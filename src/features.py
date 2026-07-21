@@ -3,7 +3,347 @@
 Menyediakan jalur fitur warna hand-crafted yang interpretable (statistik kanal
 RGB, HSV, CIELAB, rasio terkait hemoglobin, erythema index, entropy, dan fitur
 tekstur) serta jalur deep embedding berbasis backbone ringan dengan modul
-attention. Kedua jalur difusikan bersama variabel demografi dan site token.
-Implementasi menyusul pada Stage 4.
+channel spatial attention. Kedua jalur difusikan bersama variabel demografi dan
+site token memakai modul fusion attention.
+
+Fitur hand-crafted dihitung pada pixel valid hasil normalisasi Stage 2 agar
+konsisten dengan pipeline iluminasi yang sudah divalidasi. Jalur deep embedding
+memakai ResNet18 pralatih ImageNet dengan modul channel spatial attention yang
+disisipkan setelah blok pertama untuk menonjolkan detail halus seperti pembuluh
+darah, mengikuti rasionalisasi pada literatur BPANet.
 """
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Dataset
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from configs.paths import ARTIFACTS, OUTPUTS
+from src.preprocess import normalize_roi
+
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+EMBEDDING_DIM = 256
+
+HANDCRAFTED_COLUMNS = [
+    "mean_r", "mean_g", "mean_b", "mean_r_minus_g",
+    "hhr", "hhr_hue", "red_ratio", "erythema_index",
+    "mean_h", "std_h", "mean_s", "std_s", "mean_v", "std_v",
+    "mean_l", "std_l", "mean_a", "std_a", "mean_bb", "std_bb",
+    "g1", "g2", "g3", "g4", "g5",
+    "entropy", "brightness",
+]
+
+
+def _texture_features(gray, mask):
+    """Hitung fitur tekstur gray level lokal g1 hingga g5 pada jendela 3x3.
+
+    g1 hingga g4 menangkap variasi intensitas terhadap tetangga lokal, sedangkan
+    g5 adalah intensitas itu sendiri. Setiap fitur dirata-ratakan pada pixel
+    valid untuk menghasilkan satu nilai per citra.
+    """
+    gray_float = gray.astype(np.float32)
+    kernel = np.ones((3, 3), np.uint8)
+    local_min = cv2.erode(gray_float, kernel)
+    local_max = cv2.dilate(gray_float, kernel)
+    local_mean = cv2.blur(gray_float, (3, 3))
+    local_sq_mean = cv2.blur(gray_float ** 2, (3, 3))
+    local_variance = np.clip(local_sq_mean - local_mean ** 2, 0, None)
+    local_std = np.sqrt(local_variance)
+
+    g1 = gray_float - local_min
+    g2 = local_max - gray_float
+    g3 = gray_float - local_mean
+    g4 = local_std
+    g5 = gray_float
+
+    return {
+        "g1": float(g1[mask].mean()) if mask.any() else 0.0,
+        "g2": float(g2[mask].mean()) if mask.any() else 0.0,
+        "g3": float(g3[mask].mean()) if mask.any() else 0.0,
+        "g4": float(g4[mask].mean()) if mask.any() else 0.0,
+        "g5": float(g5[mask].mean()) if mask.any() else 0.0,
+    }
+
+
+def _entropy(gray, mask) -> float:
+    """Hitung entropy grayscale pada pixel valid memakai histogram 256 bin."""
+    if not mask.any():
+        return 0.0
+    values = gray[mask]
+    histogram, _ = np.histogram(values, bins=256, range=(0, 255))
+    probability = histogram / histogram.sum()
+    probability = probability[probability > 0]
+    return float(-(probability * np.log2(probability)).sum())
+
+
+def compute_handcrafted_features(rgb, valid_mask) -> dict:
+    """Hitung vektor fitur warna hand-crafted dari satu citra region of interest.
+
+    Fitur mencakup statistik RGB, rasio terkait hemoglobin, statistik HSV dan
+    CIELAB, erythema index, tekstur gray level, entropy, dan brightness. Semua
+    dihitung hanya pada pixel yang ditandai valid oleh Stage 2.
+    """
+    mask = valid_mask
+    if not mask.any():
+        return {column: 0.0 for column in HANDCRAFTED_COLUMNS}
+
+    rgb_float = rgb.astype(np.float32)
+    mean_r = float(rgb_float[:, :, 0][mask].mean())
+    mean_g = float(rgb_float[:, :, 1][mask].mean())
+    mean_b = float(rgb_float[:, :, 2][mask].mean())
+    eps = 1e-6
+
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+    hue_normalized = hsv[:, :, 0] / 179.0
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+
+    lab = cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+    l_channel, a_channel, b_channel = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
+
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+
+    features = {
+        "mean_r": mean_r,
+        "mean_g": mean_g,
+        "mean_b": mean_b,
+        "mean_r_minus_g": mean_r - mean_g,
+        "hhr": mean_r / (mean_g + eps),
+        "hhr_hue": float((hue_normalized[mask] > 0.95).mean()),
+        "red_ratio": mean_r / (mean_r + mean_g + mean_b + eps),
+        "erythema_index": float(np.log10(1.0 / (mean_g / 255.0 + eps))),
+        "mean_h": float(hue_normalized[mask].mean()),
+        "std_h": float(hue_normalized[mask].std()),
+        "mean_s": float(saturation[mask].mean()),
+        "std_s": float(saturation[mask].std()),
+        "mean_v": float(value[mask].mean()),
+        "std_v": float(value[mask].std()),
+        "mean_l": float(l_channel[mask].mean()),
+        "std_l": float(l_channel[mask].std()),
+        "mean_a": float(a_channel[mask].mean()),
+        "std_a": float(a_channel[mask].std()),
+        "mean_bb": float(b_channel[mask].mean()),
+        "std_bb": float(b_channel[mask].std()),
+        "entropy": _entropy(gray, mask),
+        "brightness": float(gray[mask].mean()),
+    }
+    features.update(_texture_features(gray, mask))
+    return features
+
+
+def extract_handcrafted_features(manifest: pd.DataFrame) -> pd.DataFrame:
+    """Jalankan ekstraksi fitur hand-crafted untuk seluruh baris manifest."""
+    records = []
+    for _, row in manifest.iterrows():
+        normalized = normalize_roi(row["roi_path"])
+        features = compute_handcrafted_features(normalized["rgb"], normalized["valid_mask"])
+        features["uid"] = row["uid"]
+        records.append(features)
+    frame = pd.DataFrame(records)
+    return frame[["uid"] + HANDCRAFTED_COLUMNS]
+
+
+class ChannelAttention(nn.Module):
+    """Modul channel attention gaya CBAM memakai pooling rata-rata dan maksimum."""
+
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        hidden = max(channels // reduction, 8)
+        self.mlp = nn.Sequential(
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, channels, kernel_size=1, bias=False),
+        )
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+    def forward(self, x):
+        gate = torch.sigmoid(self.mlp(self.avg_pool(x)) + self.mlp(self.max_pool(x)))
+        return x * gate
+
+
+class SpatialAttention(nn.Module):
+    """Modul spatial attention gaya CBAM memakai konvolusi pada peta rata-rata dan maksimum."""
+
+    def __init__(self, kernel_size: int = 7):
+        super().__init__()
+        padding = kernel_size // 2
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
+
+    def forward(self, x):
+        average_map = x.mean(dim=1, keepdim=True)
+        max_map, _ = x.max(dim=1, keepdim=True)
+        gate = torch.sigmoid(self.conv(torch.cat([average_map, max_map], dim=1)))
+        return x * gate
+
+
+class CSABlock(nn.Module):
+    """Channel spatial attention, menerapkan channel attention lalu spatial attention."""
+
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        self.channel_attention = ChannelAttention(channels, reduction)
+        self.spatial_attention = SpatialAttention()
+
+    def forward(self, x):
+        x = self.channel_attention(x)
+        x = self.spatial_attention(x)
+        return x
+
+
+class EmbeddingBackbone(nn.Module):
+    """ResNet18 pralatih ImageNet dengan modul CSA disisipkan setelah blok pertama.
+
+    Penyisipan CSA pada tahap awal jaringan bertujuan menonjolkan detail halus
+    seperti pembuluh darah pada konjungtiva sebelum representasi menjadi terlalu
+    abstrak pada blok yang lebih dalam.
+    """
+
+    def __init__(self, embedding_dim: int = EMBEDDING_DIM, pretrained: bool = True):
+        super().__init__()
+        from torchvision import models
+
+        weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = models.resnet18(weights=weights)
+        self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
+        self.layer1 = backbone.layer1
+        self.csa = CSABlock(channels=64)
+        self.layer2 = backbone.layer2
+        self.layer3 = backbone.layer3
+        self.layer4 = backbone.layer4
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.projection = nn.Linear(512, embedding_dim)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.csa(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.pool(x).flatten(1)
+        return self.projection(x)
+
+
+class ROIImageDataset(Dataset):
+    """Dataset citra region of interest ternormalisasi untuk jalur deep embedding."""
+
+    def __init__(self, frame: pd.DataFrame, size: int = 224):
+        self.rows = frame.reset_index(drop=True)
+        self.size = size
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index):
+        row = self.rows.iloc[index]
+        normalized = normalize_roi(row["roi_path"])
+        rgb = cv2.resize(normalized["rgb"], (self.size, self.size), interpolation=cv2.INTER_AREA)
+        rgb_float = rgb.astype(np.float32) / 255.0
+        rgb_float = (rgb_float - IMAGENET_MEAN) / IMAGENET_STD
+        tensor = torch.from_numpy(rgb_float.transpose(2, 0, 1)).float()
+        return tensor, row["uid"]
+
+
+def extract_deep_embeddings(
+    manifest: pd.DataFrame,
+    model: nn.Module | None = None,
+    size: int = 224,
+    batch_size: int = 32,
+    device: str | None = None,
+):
+    """Jalankan ekstraksi deep embedding untuk seluruh baris manifest.
+
+    Mengembalikan array embedding dengan urutan baris mengikuti manifest serta
+    daftar uid yang berkorespondensi untuk verifikasi kesesuaian urutan.
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model = model or EmbeddingBackbone()
+    model = model.to(device)
+    model.eval()
+
+    dataset = ROIImageDataset(manifest, size=size)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+
+    embeddings = []
+    uids = []
+    with torch.no_grad():
+        for images, batch_uids in loader:
+            images = images.to(device)
+            output = model(images)
+            embeddings.append(output.cpu().numpy())
+            uids.extend(batch_uids)
+    return np.concatenate(embeddings, axis=0), uids
+
+
+class FusionAttention(nn.Module):
+    """Modul fusion attention yang menggabungkan fitur dari berbagai sumber.
+
+    Mengikuti rasionalisasi pada literatur BPANet, atensi berbentuk vektor Q
+    dikalikan matriks key yang dapat dipelajari, dilewatkan sigmoid, lalu
+    dikalikan matriks value yang dapat dipelajari untuk menghasilkan fitur
+    fusi dengan dimensi yang sama dengan fitur masukan.
+    """
+
+    def __init__(self, feature_dim: int, attention_dim: int = 64):
+        super().__init__()
+        self.key = nn.Linear(feature_dim, attention_dim, bias=False)
+        self.value = nn.Linear(attention_dim, feature_dim, bias=False)
+
+    def forward(self, x):
+        attention = torch.sigmoid(self.key(x))
+        return self.value(attention)
+
+
+def build_fusion_input(
+    handcrafted: pd.DataFrame,
+    deep_embeddings: np.ndarray,
+    manifest: pd.DataFrame,
+) -> np.ndarray:
+    """Susun vektor fusi dari fitur hand-crafted, deep embedding, demografi, dan site token.
+
+    Fitur hand-crafted distandarisasi terlebih dahulu, umur dinormalisasi ke
+    rentang wajar, gender dan site dikodekan sebagai one-hot, lalu semuanya
+    digabungkan menjadi satu matriks fitur per baris manifest.
+    """
+    merged = manifest[["uid", "age_years", "gender", "site"]].merge(handcrafted, on="uid", how="left")
+
+    handcrafted_values = merged[HANDCRAFTED_COLUMNS].to_numpy(dtype=np.float32)
+    mean = handcrafted_values.mean(axis=0, keepdims=True)
+    std = handcrafted_values.std(axis=0, keepdims=True) + 1e-6
+    handcrafted_standardized = (handcrafted_values - mean) / std
+
+    age_normalized = (merged["age_years"].fillna(0).to_numpy(dtype=np.float32) / 100.0).reshape(-1, 1)
+    gender_binary = (merged["gender"] == "M").astype(np.float32).to_numpy().reshape(-1, 1)
+    site_dummies = pd.get_dummies(merged["site"]).to_numpy(dtype=np.float32)
+
+    return np.concatenate(
+        [handcrafted_standardized, deep_embeddings.astype(np.float32), age_normalized, gender_binary, site_dummies],
+        axis=1,
+    )
+
+
+def save_features(handcrafted: pd.DataFrame, deep_embeddings: np.ndarray, uids: list) -> dict:
+    """Simpan fitur hand-crafted dan deep embedding ke folder outputs."""
+    OUTPUTS.mkdir(parents=True, exist_ok=True)
+    handcrafted_path = OUTPUTS / "handcrafted_features.csv"
+    embeddings_path = OUTPUTS / "deep_embeddings.npy"
+    uids_path = OUTPUTS / "deep_embeddings_uids.csv"
+
+    handcrafted.to_csv(handcrafted_path, index=False)
+    np.save(embeddings_path, deep_embeddings)
+    pd.DataFrame({"uid": uids}).to_csv(uids_path, index=False)
+
+    return {
+        "handcrafted": str(handcrafted_path),
+        "embeddings": str(embeddings_path),
+        "uids": str(uids_path),
+    }
