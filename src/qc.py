@@ -12,6 +12,8 @@ sebagai pasangan RGB uint8 dan mask boolean yang seragam.
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +22,25 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+@contextlib.contextmanager
+def _suppress_c_stderr():
+    """Bungkam pesan tingkat C seperti peringatan libpng iCCP selama pembacaan citra.
+
+    Beberapa PNG dataset memiliki profil warna rusak yang memicu peringatan
+    berulang dari libpng. Peringatan ditulis langsung ke file descriptor stderr
+    sehingga dibungkam dengan mengalihkan descriptor tersebut sementara.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved = os.dup(2)
+    os.dup2(devnull, 2)
+    try:
+        yield
+    finally:
+        os.dup2(saved, 2)
+        os.close(devnull)
+        os.close(saved)
 
 DEFAULT_THRESHOLDS = {
     "min_laplacian_variance": 2.0,
@@ -38,7 +59,8 @@ def load_roi(path: str):
     berupa hitam atau putih. Bila tidak ada latar dominan, seluruh pixel dianggap
     region of interest.
     """
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    with _suppress_c_stderr():
+        image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if image is None:
         raise FileNotFoundError(f"Gagal membaca citra: {path}")
     if image.dtype == np.uint16:
