@@ -1,0 +1,9 @@
+dataset/
+outputs/*
+artifacts/*
+!outputs/.gitkeep
+!artifacts/.gitkeep
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store

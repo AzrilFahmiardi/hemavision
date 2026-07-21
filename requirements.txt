@@ -1,0 +1,17 @@
+torch==2.13.0
+torchvision==0.28.0
+numpy
+pandas
+opencv-python
+pillow
+scikit-learn
+scikit-image
+matplotlib
+openpyxl
+albumentations
+timm
+segmentation-models-pytorch
+optuna
+jupyter
+nbconvert
+papermill
