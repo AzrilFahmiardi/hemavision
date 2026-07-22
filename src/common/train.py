@@ -48,6 +48,36 @@ def _iterate_batches(n_rows: int, batch_size: int, rng: np.random.Generator):
         yield order[start:start + batch_size]
 
 
+def evaluate_by_dataset(oof: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
+    """Hitung MAE, akurasi, dan akurasi severity per dataset dari prediksi out-of-fold.
+
+    Berguna sebagai diagnosis standar untuk mendeteksi apakah performa gabungan
+    yang terlihat baik sebenarnya menyembunyikan satu dataset yang collapse ke
+    kelas mayoritas, serta sebagai sinyal untuk objective pencarian hyperparameter
+    yang sadar keadilan antar dataset.
+    """
+    merged = oof.merge(manifest[["uid", "dataset"]], on="uid", how="left")
+    rows = []
+    for dataset_name, group in merged.groupby("dataset"):
+        mae = float(np.mean(np.abs(group["hb_pred"] - group["hb_true"])))
+        accuracy = float(np.mean(group["anemic_pred"] == group["anemic_true"]))
+        severity_valid = group["severity_true"] >= 0
+        if severity_valid.any():
+            severity_accuracy = float(
+                np.mean(group.loc[severity_valid, "severity_pred"] == group.loc[severity_valid, "severity_true"])
+            )
+        else:
+            severity_accuracy = float("nan")
+        rows.append({
+            "dataset": dataset_name,
+            "n": len(group),
+            "mae": mae,
+            "accuracy": accuracy,
+            "severity_accuracy": severity_accuracy,
+        })
+    return pd.DataFrame(rows)
+
+
 def run_kfold(
     manifest: pd.DataFrame,
     handcrafted: pd.DataFrame,
@@ -58,6 +88,10 @@ def run_kfold(
     batch_size: int = 64,
     learning_rate: float = 1e-3,
     loss_weights: tuple[float, float, float] = (1.0, 1.0, 0.5),
+    trunk_dim: int = 128,
+    attention_dim: int = 64,
+    dropout: float = 0.3,
+    focal_gamma: float = 2.0,
     use_handcrafted: bool = True,
     use_deep: bool = True,
     device: str | None = None,
@@ -109,11 +143,16 @@ def run_kfold(
         train_has_severity = has_severity[train_mask.to_numpy()]
         val_has_severity = has_severity[val_mask.to_numpy()]
 
-        model = HemavisionModel(input_dim=train_features.shape[1]).to(device)
+        model = HemavisionModel(
+            input_dim=train_features.shape[1],
+            attention_dim=attention_dim,
+            trunk_dim=trunk_dim,
+            dropout=dropout,
+        ).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-        dual_loss_fn = DualLoss()
+        dual_loss_fn = DualLoss(gamma=focal_gamma)
         classification_alpha = _class_weights(train_anemic, num_classes=2)
-        classification_loss_fn = FocalLoss(alpha=classification_alpha)
+        classification_loss_fn = FocalLoss(gamma=focal_gamma, alpha=classification_alpha)
         severity_loss_fn = CornLoss()
 
         train_features_tensor = torch.tensor(train_features, dtype=torch.float32, device=device)
