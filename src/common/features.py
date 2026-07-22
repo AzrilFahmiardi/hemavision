@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from configs.paths import ARTIFACTS, OUTPUTS
 from src.common.preprocess import normalize_roi
 
@@ -199,36 +199,66 @@ class CSABlock(nn.Module):
         return x
 
 
-class EmbeddingBackbone(nn.Module):
-    """ResNet18 pralatih ImageNet dengan modul CSA disisipkan setelah blok pertama.
+def _split_backbone(backbone_name: str, pretrained: bool):
+    """Bangun bagian awal dan bagian lanjutan sebuah backbone pralatih ImageNet.
 
-    Penyisipan CSA pada tahap awal jaringan bertujuan menonjolkan detail halus
-    seperti pembuluh darah pada konjungtiva sebelum representasi menjadi terlalu
-    abstrak pada blok yang lebih dalam.
+    Bagian awal adalah titik penyisipan CSA, dipilih pada tahap dangkal jaringan
+    agar atensi menonjolkan detail halus seperti pembuluh darah sebelum
+    representasi menjadi terlalu abstrak. Backbone yang didukung adalah resnet18
+    dan mobilenet_v3_small, mewakili perbandingan model berat lawan model ringan
+    yang ramah perangkat edge.
     """
+    from torchvision import models
 
-    def __init__(self, embedding_dim: int = EMBEDDING_DIM, pretrained: bool = True):
-        super().__init__()
-        from torchvision import models
-
+    if backbone_name == "resnet18":
         weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         backbone = models.resnet18(weights=weights)
-        self.stem = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
-        self.layer1 = backbone.layer1
-        self.csa = CSABlock(channels=64)
-        self.layer2 = backbone.layer2
-        self.layer3 = backbone.layer3
-        self.layer4 = backbone.layer4
+        early = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool, backbone.layer1)
+        late = nn.Sequential(backbone.layer2, backbone.layer3, backbone.layer4)
+        return early, late
+
+    if backbone_name == "mobilenet_v3_small":
+        weights = models.MobileNet_V3_Small_Weights.IMAGENET1K_V1 if pretrained else None
+        backbone = models.mobilenet_v3_small(weights=weights)
+        blocks = list(backbone.features.children())
+        split = 4
+        early = nn.Sequential(*blocks[:split])
+        late = nn.Sequential(*blocks[split:])
+        return early, late
+
+    raise ValueError(f"backbone_name tidak dikenal: {backbone_name}")
+
+
+class EmbeddingBackbone(nn.Module):
+    """Backbone pralatih ImageNet dengan modul CSA disisipkan pada tahap dangkal.
+
+    Mendukung resnet18 (representasi lebih kaya, cocok sebagai kandidat utama)
+    dan mobilenet_v3_small (lebih ringan, relevan untuk deployment perangkat
+    edge). Dimensi channel pada titik penyisipan CSA dan pada keluaran akhir
+    backbone dideteksi otomatis lewat forward pass dummy, sehingga tidak
+    bergantung pada nilai channel yang di-hardcode per arsitektur.
+    """
+
+    def __init__(self, embedding_dim: int = EMBEDDING_DIM, pretrained: bool = True, backbone_name: str = "resnet18"):
+        super().__init__()
+        self.backbone_name = backbone_name
+        self.early, self.late = _split_backbone(backbone_name, pretrained)
+
+        with torch.no_grad():
+            dummy = torch.zeros(1, 3, 224, 224)
+            early_output = self.early(dummy)
+            csa_channels = early_output.shape[1]
+            late_output = self.late(early_output)
+            final_channels = late_output.shape[1]
+
+        self.csa = CSABlock(channels=csa_channels)
         self.pool = nn.AdaptiveAvgPool2d(1)
-        self.projection = nn.Linear(512, embedding_dim)
+        self.projection = nn.Linear(final_channels, embedding_dim)
 
     def forward(self, x):
-        x = self.stem(x)
-        x = self.layer1(x)
+        x = self.early(x)
         x = self.csa(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x = self.late(x)
         x = self.pool(x).flatten(1)
         return self.projection(x)
 
@@ -303,32 +333,61 @@ class FusionAttention(nn.Module):
         return self.value(attention)
 
 
+def compute_fusion_stats(handcrafted: pd.DataFrame, manifest: pd.DataFrame, site_categories: list | None = None) -> dict:
+    """Hitung statistik standardisasi dan kosakata site tetap dari satu subset manifest.
+
+    Statistik ini wajib dihitung hanya dari fold atau split train agar tidak
+    terjadi kebocoran data ke fold atau split validasi. Kosakata site ditetapkan
+    eksplisit agar lebar one-hot encoding tetap konsisten meski satu subset
+    kebetulan tidak memuat seluruh kategori site.
+    """
+    merged = manifest[["uid", "site"]].merge(handcrafted, on="uid", how="left")
+    handcrafted_values = merged[HANDCRAFTED_COLUMNS].to_numpy(dtype=np.float32)
+    mean = handcrafted_values.mean(axis=0, keepdims=True)
+    std = handcrafted_values.std(axis=0, keepdims=True) + 1e-6
+    categories = site_categories or sorted(manifest["site"].unique().tolist())
+    return {"mean": mean, "std": std, "site_categories": categories}
+
+
 def build_fusion_input(
     handcrafted: pd.DataFrame,
     deep_embeddings: np.ndarray,
     manifest: pd.DataFrame,
+    stats: dict | None = None,
+    use_handcrafted: bool = True,
+    use_deep: bool = True,
 ) -> np.ndarray:
     """Susun vektor fusi dari fitur hand-crafted, deep embedding, demografi, dan site token.
 
-    Fitur hand-crafted distandarisasi terlebih dahulu, umur dinormalisasi ke
-    rentang wajar, gender dan site dikodekan sebagai one-hot, lalu semuanya
-    digabungkan menjadi satu matriks fitur per baris manifest.
-    """
-    merged = manifest[["uid", "age_years", "gender", "site"]].merge(handcrafted, on="uid", how="left")
+    Fitur hand-crafted distandarisasi memakai stats yang diberikan, umur
+    dinormalisasi ke rentang wajar, gender dikodekan biner, dan site dikodekan
+    sebagai one-hot dengan kosakata tetap dari stats. Bila stats tidak diisi,
+    dihitung otomatis dari manifest yang diberikan, cocok untuk eksplorasi pada
+    seluruh dataset. Untuk pelatihan dengan validasi silang, stats harus selalu
+    dihitung dari fold train saja lewat compute_fusion_stats.
 
-    handcrafted_values = merged[HANDCRAFTED_COLUMNS].to_numpy(dtype=np.float32)
-    mean = handcrafted_values.mean(axis=0, keepdims=True)
-    std = handcrafted_values.std(axis=0, keepdims=True) + 1e-6
-    handcrafted_standardized = (handcrafted_values - mean) / std
+    Parameter use_handcrafted dan use_deep memungkinkan penyusunan vektor fitur
+    untuk konfigurasi jalur tunggal (Path A saja atau Path B saja) memakai
+    perlakuan demografi dan site token yang identik dengan konfigurasi fusi
+    penuh, sehingga perbandingan antar konfigurasi tetap adil.
+    """
+    stats = stats or compute_fusion_stats(handcrafted, manifest)
+    merged = manifest[["uid", "age_years", "gender", "site"]].merge(handcrafted, on="uid", how="left")
 
     age_normalized = (merged["age_years"].fillna(0).to_numpy(dtype=np.float32) / 100.0).reshape(-1, 1)
     gender_binary = (merged["gender"] == "M").astype(np.float32).to_numpy().reshape(-1, 1)
-    site_dummies = pd.get_dummies(merged["site"]).to_numpy(dtype=np.float32)
+    site_categorical = pd.Categorical(merged["site"], categories=stats["site_categories"])
+    site_dummies = pd.get_dummies(site_categorical).to_numpy(dtype=np.float32)
 
-    return np.concatenate(
-        [handcrafted_standardized, deep_embeddings.astype(np.float32), age_normalized, gender_binary, site_dummies],
-        axis=1,
-    )
+    blocks = []
+    if use_handcrafted:
+        handcrafted_values = merged[HANDCRAFTED_COLUMNS].to_numpy(dtype=np.float32)
+        blocks.append((handcrafted_values - stats["mean"]) / stats["std"])
+    if use_deep:
+        blocks.append(deep_embeddings.astype(np.float32))
+    blocks.extend([age_normalized, gender_binary, site_dummies])
+
+    return np.concatenate(blocks, axis=1)
 
 
 def save_features(

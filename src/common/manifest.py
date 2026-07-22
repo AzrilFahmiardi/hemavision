@@ -94,3 +94,23 @@ def assign_stratified_split(
             elif ratio >= train_end:
                 result.at[row_index, "split"] = "val"
     return result
+
+
+def assign_kfold(frame: pd.DataFrame, n_splits: int = 5, seed: int = 42) -> pd.DataFrame:
+    """Tambahkan kolom fold berisi indeks 0 hingga n_splits minus 1.
+
+    Stratifikasi dilakukan per kombinasi dataset dan label anemik, mengikuti
+    pola assign_stratified_split, agar setiap fold representatif untuk seluruh
+    dataset dan kelas yang terlibat. Setiap baris mewakili satu pasien sehingga
+    pembagian ini setara dengan pembagian berbasis pasien.
+    """
+    rng = np.random.default_rng(seed)
+    result = frame.copy()
+    result["fold"] = 0
+    for _, group in result.groupby(["dataset", "anemic"]):
+        indices = np.array(group.index.to_list())
+        rng.shuffle(indices)
+        fold_assignment = np.arange(len(indices)) % n_splits
+        for row_index, fold in zip(indices, fold_assignment):
+            result.at[row_index, "fold"] = int(fold)
+    return result
