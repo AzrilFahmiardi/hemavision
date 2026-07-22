@@ -1,4 +1,4 @@
-"""Stage 3. Segmentation front-end.
+"""Segmentation front-end untuk situs konjungtiva.
 
 Melatih U-Net pada foto mata utuh Eyes-Defy untuk memprediksi mask konjungtiva
 palpebral. Segmentasi ini menjadi jembatan dari citra mentah menuju region of
@@ -27,7 +27,7 @@ import segmentation_models_pytorch as smp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from configs.paths import ARTIFACTS, OUTPUTS
-from src.qc import load_roi
+from src.common.qc import load_roi
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -119,12 +119,20 @@ def train_unet(
     learning_rate: float = 1e-3,
     encoder: str = "resnet34",
     device: str | None = None,
+    artifacts_dir: Path | None = None,
+    output_dir: Path | None = None,
 ):
     """Latih U-Net segmentasi dan simpan checkpoint serta metrik ke disk.
+
+    Bila artifacts_dir atau output_dir tidak diisi, keduanya jatuh ke folder
+    datar ARTIFACTS dan OUTPUTS. Notebook situs sebaiknya selalu mengisi kedua
+    parameter dengan folder bernamespace situs.
 
     Mengembalikan model terlatih, riwayat pelatihan, dan metrik validasi terbaik.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    artifacts_dir = artifacts_dir or ARTIFACTS
+    output_dir = output_dir or OUTPUTS
     train_ds, val_ds = build_datasets(manifest, size=size)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=2)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
@@ -136,8 +144,8 @@ def train_unet(
 
     history = {"train_loss": [], "val_dice": [], "val_iou": []}
     best_dice = 0.0
-    ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = ARTIFACTS / "segmentation_unet.pt"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = artifacts_dir / "segmentation_unet.pt"
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -173,8 +181,8 @@ def train_unet(
             torch.save(model.state_dict(), checkpoint_path)
 
     metrics = {"best_val_dice": best_dice, "final_val_iou": history["val_iou"][-1], "epochs": epochs, "size": size}
-    OUTPUTS.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUTS / "segmentation_metrics.json", "w") as handle:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "segmentation_metrics.json", "w") as handle:
         json.dump(metrics, handle, indent=2)
 
     return {"model": model, "history": history, "metrics": metrics, "checkpoint": str(checkpoint_path)}
@@ -187,11 +195,15 @@ def denormalize(image_tensor) -> np.ndarray:
     return np.clip(array, 0, 1)
 
 
-def save_overlays(model, dataset, count: int = 4, device: str | None = None):
-    """Simpan contoh overlay prediksi mask pada citra validasi ke folder outputs."""
+def save_overlays(model, dataset, count: int = 4, device: str | None = None, output_dir: Path | None = None):
+    """Simpan contoh overlay prediksi mask pada citra validasi ke folder output.
+
+    Bila output_dir tidak diisi, overlay disimpan ke folder outputs datar.
+    """
     import matplotlib.pyplot as plt
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    output_dir = output_dir or OUTPUTS
     model.eval()
     count = min(count, len(dataset))
     fig, axes = plt.subplots(count, 3, figsize=(9, 3 * count))
@@ -213,8 +225,8 @@ def save_overlays(model, dataset, count: int = 4, device: str | None = None):
             for ax in axes[i]:
                 ax.axis("off")
     plt.tight_layout()
-    OUTPUTS.mkdir(parents=True, exist_ok=True)
-    output_path = OUTPUTS / "segmentation_overlays.png"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "segmentation_overlays.png"
     plt.savefig(output_path, dpi=110)
     plt.close(fig)
     return str(output_path)

@@ -1,4 +1,4 @@
-"""Stage 4. Dual-path feature extraction.
+"""Dual-path feature extraction.
 
 Menyediakan jalur fitur warna hand-crafted yang interpretable (statistik kanal
 RGB, HSV, CIELAB, rasio terkait hemoglobin, erythema index, entropy, dan fitur
@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from configs.paths import ARTIFACTS, OUTPUTS
-from src.preprocess import normalize_roi
+from src.common.preprocess import normalize_roi
 
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
 IMAGENET_STD = np.array([0.229, 0.224, 0.225])
@@ -331,12 +331,23 @@ def build_fusion_input(
     )
 
 
-def save_features(handcrafted: pd.DataFrame, deep_embeddings: np.ndarray, uids: list) -> dict:
-    """Simpan fitur hand-crafted dan deep embedding ke folder outputs."""
-    OUTPUTS.mkdir(parents=True, exist_ok=True)
-    handcrafted_path = OUTPUTS / "handcrafted_features.csv"
-    embeddings_path = OUTPUTS / "deep_embeddings.npy"
-    uids_path = OUTPUTS / "deep_embeddings_uids.csv"
+def save_features(
+    handcrafted: pd.DataFrame,
+    deep_embeddings: np.ndarray,
+    uids: list,
+    output_dir: Path | None = None,
+) -> dict:
+    """Simpan fitur hand-crafted dan deep embedding ke folder output yang ditentukan.
+
+    Bila output_dir tidak diisi, fitur disimpan ke folder outputs datar. Notebook
+    situs sebaiknya selalu mengisi output_dir dengan folder bernamespace situs
+    agar tidak menimpa fitur milik situs lain.
+    """
+    target = output_dir or OUTPUTS
+    target.mkdir(parents=True, exist_ok=True)
+    handcrafted_path = target / "handcrafted_features.csv"
+    embeddings_path = target / "deep_embeddings.npy"
+    uids_path = target / "deep_embeddings_uids.csv"
 
     handcrafted.to_csv(handcrafted_path, index=False)
     np.save(embeddings_path, deep_embeddings)

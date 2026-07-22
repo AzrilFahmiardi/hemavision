@@ -1,4 +1,4 @@
-"""Stage 1. Quality control gate.
+"""Quality control gate.
 
 Menolak citra berkualitas buruk sebelum masuk pipeline agar terhindar dari efek
 garbage in garbage out. Empat metrik dihitung pada area region of interest

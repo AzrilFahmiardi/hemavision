@@ -20,4 +20,4 @@ Susun notebook dengan header Markdown yang jelas, memakai satu tanda pagar untuk
 
 ## Deliverable Layout
 
-Setiap stage pipeline ditulis sebagai satu notebook driver di folder `notebooks/`. Fungsi yang dapat digunakan ulang diletakkan pada paket `src/` dan diimpor oleh notebook.
+Setiap stage pipeline ditulis sebagai satu notebook driver di folder `notebooks/<situs>/`. Fungsi generik yang dipakai lintas situs diletakkan pada paket `src/common/`, sedangkan fungsi yang spesifik untuk satu situs anatomis diletakkan pada paket `src/sites/<situs>/`. Notebook mengimpor keduanya sesuai kebutuhan.

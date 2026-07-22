@@ -9,7 +9,7 @@ Jalankan dari root proyek di mesin lokal.
 ```
 cd '/home/azril/Personal/Projects/DSAI/Gemastik 2026'
 rsync -az --delete \
-  --exclude dataset/ --exclude 'outputs/*' --exclude 'artifacts/*' \
+  --exclude dataset/ --exclude 'outputs/**' --exclude 'artifacts/**' \
   --exclude __pycache__/ --exclude '.ipynb_checkpoints/' --exclude '.git/' \
   -e 'ssh -J praktikan@103.127.97.22:7072' \
   ./hemavision/ praktikan@10.33.35.198:/home/praktikan/projects/Azril/hemavision/
@@ -26,8 +26,10 @@ cd ~/projects/Azril/hemavision
 
 ## Run a Notebook Headless
 
+Notebook driver berada di dalam folder situs anatomisnya, misalnya `notebooks/conjunctiva/`.
+
 ```
-jupyter nbconvert --to notebook --execute --inplace notebooks/NAMA_NOTEBOOK.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/conjunctiva/NAMA_NOTEBOOK.ipynb
 ```
 
 ## Run a Long Training Detached
@@ -35,8 +37,8 @@ jupyter nbconvert --to notebook --execute --inplace notebooks/NAMA_NOTEBOOK.ipyn
 Berguna agar proses tetap jalan meski koneksi SSH terputus.
 
 ```
-nohup bash -c 'jupyter nbconvert --to notebook --execute --inplace notebooks/NAMA_NOTEBOOK.ipynb && echo DONE' > outputs/run.log 2>&1 &
-tail -f outputs/run.log
+nohup bash -c 'jupyter nbconvert --to notebook --execute --inplace notebooks/conjunctiva/NAMA_NOTEBOOK.ipynb && echo DONE' > outputs/conjunctiva/run.log 2>&1 &
+tail -f outputs/conjunctiva/run.log
 ```
 
 ## Monitor GPU
@@ -49,6 +51,6 @@ nvtop
 
 ```
 rsync -az -e 'ssh -J praktikan@103.127.97.22:7072' \
-  praktikan@10.33.35.198:/home/praktikan/projects/Azril/hemavision/outputs/ \
-  ./hemavision/outputs/
+  praktikan@10.33.35.198:/home/praktikan/projects/Azril/hemavision/outputs/conjunctiva/ \
+  ./hemavision/outputs/conjunctiva/
 ```

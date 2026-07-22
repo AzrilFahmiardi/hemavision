@@ -4,5 +4,7 @@ Sistem skrining anemia non-invasif berbasis citra konjungtiva. Berfokus pada mod
 
 ## Project Layout
 
-Paket `src/` memuat fungsi reusable per stage. Folder `notebooks/` memuat notebook driver per stage. Folder `configs/` memuat resolusi path dan pengaturan. Folder `outputs/` menampung manifest, tabel metrik, dan gambar. Folder `artifacts/` menampung checkpoint model. Folder `dataset/` hanya ada di server sebagai target sinkronisasi.
+Proyek disusun mengikuti arsitektur multi-situs anatomis, sehingga pengembangan satu situs (konjungtiva, telapak tangan, kuku) terpisah dari situs lain namun tetap berada dalam repo yang sama.
+
+Paket `src/common/` memuat fungsi generik yang dipakai lintas situs, seperti quality control, normalisasi iluminasi, ekstraksi fitur dual-path, serta model dan metrik evaluasi multi-task. Paket `src/sites/<situs>/` memuat kode yang spesifik untuk satu situs, seperti loader dataset dan model segmentasi. Folder `notebooks/<situs>/` memuat notebook driver per stage untuk situs tersebut. Folder `configs/` memuat resolusi path yang bernamespace per situs. Folder `dataset/<situs>/`, `outputs/<situs>/`, dan `artifacts/<situs>/` masing-masing menampung data mentah, hasil (manifest, tabel metrik, gambar), dan checkpoint model milik satu situs, sehingga tidak saling menimpa.
 

@@ -1,4 +1,4 @@
-"""Stage 2. Illumination normalization.
+"""Illumination normalization.
 
 Menstabilkan variasi pencahayaan memakai CLAHE pada channel V ruang warna HSV,
 lalu menandai pixel valid dengan membuang pixel sangat gelap atau sangat terang
@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.qc import load_roi
+from src.common.qc import load_roi
 
 
 def crop_to_roi(rgb, mask, padding: int = 4):
