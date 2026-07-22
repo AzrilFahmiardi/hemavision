@@ -25,7 +25,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from configs.paths import ARTIFACTS, OUTPUTS
 from src.common.qc import load_roi
 
