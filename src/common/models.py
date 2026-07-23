@@ -125,9 +125,13 @@ class HemavisionModel(nn.Module):
         hb_range: tuple[float, float] = HB_RANGE,
         severity_classes: int = SEVERITY_CLASSES,
         dropout: float = 0.3,
+        use_fusion_attention: bool = True,
     ):
         super().__init__()
-        self.fusion_attention = FusionAttention(feature_dim=input_dim, attention_dim=attention_dim)
+        self.fusion_attention = (
+            FusionAttention(feature_dim=input_dim, attention_dim=attention_dim)
+            if use_fusion_attention else nn.Identity()
+        )
         self.trunk = nn.Sequential(
             nn.Linear(input_dim, trunk_dim),
             nn.ReLU(inplace=True),
@@ -165,3 +169,29 @@ class HemavisionModel(nn.Module):
         """Konversi nilai hemoglobin menjadi indeks bin untuk target Dual Loss."""
         index = ((hb_values - self.hb_min) / self.bin_width).long()
         return index.clamp(0, self.n_bins - 1)
+
+
+class EndToEndModel(nn.Module):
+    """Model gabungan yang melatih backbone deep embedding bersama head multi-task.
+
+    Membungkus satu EmbeddingBackbone dan satu HemavisionModel. Citra diproses
+    lewat backbone untuk menghasilkan embedding, digabung dengan static_features
+    (fitur hand-crafted terstandardisasi, demografi, dan site token yang sudah
+    dihitung sebelumnya karena deterministik), lalu diteruskan ke HemavisionModel.
+    Badan backbone biasanya dibekukan lewat freeze_backbone_body sebelum
+    pelatihan, sehingga hanya modul CSA, proyeksi, fusion attention, trunk, dan
+    head yang menerima gradien.
+    """
+
+    def __init__(self, embedding_backbone: nn.Module, static_dim: int, embedding_dim: int, **hemavision_kwargs):
+        super().__init__()
+        self.embedding_backbone = embedding_backbone
+        self.hemavision_model = HemavisionModel(input_dim=static_dim + embedding_dim, **hemavision_kwargs)
+
+    def forward(self, image: torch.Tensor, static_features: torch.Tensor) -> dict:
+        embedding = self.embedding_backbone(image)
+        fusion_input = torch.cat([static_features, embedding], dim=1)
+        return self.hemavision_model(fusion_input)
+
+    def hb_to_bin_index(self, hb_values: torch.Tensor) -> torch.Tensor:
+        return self.hemavision_model.hb_to_bin_index(hb_values)

@@ -164,9 +164,11 @@ class ChannelAttention(nn.Module):
         )
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.last_gate = None
 
     def forward(self, x):
         gate = torch.sigmoid(self.mlp(self.avg_pool(x)) + self.mlp(self.max_pool(x)))
+        self.last_gate = gate.detach()
         return x * gate
 
 
@@ -177,11 +179,13 @@ class SpatialAttention(nn.Module):
         super().__init__()
         padding = kernel_size // 2
         self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=padding, bias=False)
+        self.last_gate = None
 
     def forward(self, x):
         average_map = x.mean(dim=1, keepdim=True)
         max_map, _ = x.max(dim=1, keepdim=True)
         gate = torch.sigmoid(self.conv(torch.cat([average_map, max_map], dim=1)))
+        self.last_gate = gate.detach()
         return x * gate
 
 
@@ -239,9 +243,17 @@ class EmbeddingBackbone(nn.Module):
     bergantung pada nilai channel yang di-hardcode per arsitektur.
     """
 
-    def __init__(self, embedding_dim: int = EMBEDDING_DIM, pretrained: bool = True, backbone_name: str = "resnet18"):
+    def __init__(
+        self,
+        embedding_dim: int = EMBEDDING_DIM,
+        pretrained: bool = True,
+        backbone_name: str = "resnet18",
+        use_csa: bool = True,
+        seed: int | None = None,
+    ):
         super().__init__()
         self.backbone_name = backbone_name
+        self.use_csa = use_csa
         self.early, self.late = _split_backbone(backbone_name, pretrained)
 
         with torch.no_grad():
@@ -251,7 +263,9 @@ class EmbeddingBackbone(nn.Module):
             late_output = self.late(early_output)
             final_channels = late_output.shape[1]
 
-        self.csa = CSABlock(channels=csa_channels)
+        if seed is not None:
+            torch.manual_seed(seed)
+        self.csa = CSABlock(channels=csa_channels) if use_csa else nn.Identity()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.projection = nn.Linear(final_channels, embedding_dim)
 
@@ -261,6 +275,32 @@ class EmbeddingBackbone(nn.Module):
         x = self.late(x)
         x = self.pool(x).flatten(1)
         return self.projection(x)
+
+
+def load_roi_tensor(roi_path: str, size: int = 224) -> torch.Tensor:
+    """Muat citra region of interest, ubah ukuran, dan normalisasi gaya ImageNet.
+
+    Dipakai bersama oleh ROIImageDataset dan dataset pelatihan end-to-end agar
+    logika pemuatan citra tidak terduplikasi.
+    """
+    normalized = normalize_roi(roi_path)
+    rgb = cv2.resize(normalized["rgb"], (size, size), interpolation=cv2.INTER_AREA)
+    rgb_float = rgb.astype(np.float32) / 255.0
+    rgb_float = (rgb_float - IMAGENET_MEAN) / IMAGENET_STD
+    return torch.from_numpy(rgb_float.transpose(2, 0, 1)).float()
+
+
+def freeze_backbone_body(model: "EmbeddingBackbone") -> None:
+    """Bekukan bobot badan backbone (early dan late), sisakan CSA dan proyeksi trainable.
+
+    Mengikuti pendekatan transfer learning standar, badan ResNet atau MobileNet
+    pralatih ImageNet dipertahankan tetap, sedangkan modul CSA dan proyeksi
+    dilatih bersama fusion attention dan head lewat backpropagation penuh.
+    """
+    for parameter in model.early.parameters():
+        parameter.requires_grad = False
+    for parameter in model.late.parameters():
+        parameter.requires_grad = False
 
 
 class ROIImageDataset(Dataset):
@@ -275,11 +315,7 @@ class ROIImageDataset(Dataset):
 
     def __getitem__(self, index):
         row = self.rows.iloc[index]
-        normalized = normalize_roi(row["roi_path"])
-        rgb = cv2.resize(normalized["rgb"], (self.size, self.size), interpolation=cv2.INTER_AREA)
-        rgb_float = rgb.astype(np.float32) / 255.0
-        rgb_float = (rgb_float - IMAGENET_MEAN) / IMAGENET_STD
-        tensor = torch.from_numpy(rgb_float.transpose(2, 0, 1)).float()
+        tensor = load_roi_tensor(row["roi_path"], size=self.size)
         return tensor, row["uid"]
 
 
@@ -356,6 +392,8 @@ def build_fusion_input(
     stats: dict | None = None,
     use_handcrafted: bool = True,
     use_deep: bool = True,
+    use_demographics: bool = True,
+    use_site_token: bool = True,
 ) -> np.ndarray:
     """Susun vektor fusi dari fitur hand-crafted, deep embedding, demografi, dan site token.
 
@@ -369,15 +407,12 @@ def build_fusion_input(
     Parameter use_handcrafted dan use_deep memungkinkan penyusunan vektor fitur
     untuk konfigurasi jalur tunggal (Path A saja atau Path B saja) memakai
     perlakuan demografi dan site token yang identik dengan konfigurasi fusi
-    penuh, sehingga perbandingan antar konfigurasi tetap adil.
+    penuh, sehingga perbandingan antar konfigurasi tetap adil. Parameter
+    use_demographics dan use_site_token memungkinkan ablation komponen umur dan
+    gender, atau site token, secara terpisah.
     """
     stats = stats or compute_fusion_stats(handcrafted, manifest)
     merged = manifest[["uid", "age_years", "gender", "site"]].merge(handcrafted, on="uid", how="left")
-
-    age_normalized = (merged["age_years"].fillna(0).to_numpy(dtype=np.float32) / 100.0).reshape(-1, 1)
-    gender_binary = (merged["gender"] == "M").astype(np.float32).to_numpy().reshape(-1, 1)
-    site_categorical = pd.Categorical(merged["site"], categories=stats["site_categories"])
-    site_dummies = pd.get_dummies(site_categorical).to_numpy(dtype=np.float32)
 
     blocks = []
     if use_handcrafted:
@@ -385,7 +420,14 @@ def build_fusion_input(
         blocks.append((handcrafted_values - stats["mean"]) / stats["std"])
     if use_deep:
         blocks.append(deep_embeddings.astype(np.float32))
-    blocks.extend([age_normalized, gender_binary, site_dummies])
+    if use_demographics:
+        age_normalized = (merged["age_years"].fillna(0).to_numpy(dtype=np.float32) / 100.0).reshape(-1, 1)
+        gender_binary = (merged["gender"] == "M").astype(np.float32).to_numpy().reshape(-1, 1)
+        blocks.extend([age_normalized, gender_binary])
+    if use_site_token:
+        site_categorical = pd.Categorical(merged["site"], categories=stats["site_categories"])
+        site_dummies = pd.get_dummies(site_categorical).to_numpy(dtype=np.float32)
+        blocks.append(site_dummies)
 
     return np.concatenate(blocks, axis=1)
 
