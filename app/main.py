@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -26,6 +27,13 @@ app = FastAPI(
     title="Hemavision API",
     description="Skrining anemia non-invasif berbasis citra konjungtiva dan palm.",
     version="0.1.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
