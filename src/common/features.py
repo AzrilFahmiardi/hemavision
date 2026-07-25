@@ -24,6 +24,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
+cv2.setNumThreads(0)
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from configs.paths import ARTIFACTS, OUTPUTS
 from src.common.preprocess import normalize_roi
