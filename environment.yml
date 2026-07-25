@@ -22,3 +22,6 @@ dependencies:
       - jupyter
       - nbconvert
       - papermill
+      - fastapi
+      - uvicorn
+      - python-multipart

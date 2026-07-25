@@ -3,6 +3,7 @@ torchvision==0.28.0
 numpy
 pandas
 opencv-python
+mediapipe
 pillow
 scikit-learn
 scikit-image
@@ -15,3 +16,6 @@ optuna
 jupyter
 nbconvert
 papermill
+fastapi
+uvicorn
+python-multipart
