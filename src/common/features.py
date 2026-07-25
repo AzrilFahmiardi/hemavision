@@ -311,15 +311,48 @@ def _augment_roi(rgb: np.ndarray) -> np.ndarray:
     return np.clip(rgb_float, 0.0, 255.0).astype(np.uint8)
 
 
-def load_roi_tensor(roi_path: str, size: int = 224, augment: bool = False) -> torch.Tensor:
+def load_normalized_resized(roi_path: str, size: int = 224) -> np.ndarray:
+    """Muat dan normalisasi satu citra ROI, lalu ubah ukuran, tanpa augmentasi.
+
+    Hasil fungsi ini deterministik terhadap roi_path dan size, sehingga aman
+    di-cache lintas epoch lewat precompute_normalized_images, mengingat
+    normalize_roi (termasuk CLAHE) adalah langkah paling mahal pada pipeline
+    pemuatan citra.
+    """
+    normalized = normalize_roi(roi_path)
+    return cv2.resize(normalized["rgb"], (size, size), interpolation=cv2.INTER_AREA)
+
+
+def precompute_normalized_images(manifest: pd.DataFrame, size: int = 224) -> dict:
+    """Precompute dan cache citra ROI ternormalisasi untuk seluruh baris manifest.
+
+    Dipanggil sekali sebelum loop k-fold pada fine-tuning end-to-end, sehingga
+    normalize_roi (mahal karena CLAHE) tidak dihitung ulang pada setiap epoch
+    dan setiap fold. Cache dibangun di proses utama sebelum DataLoader
+    membuat worker, sehingga worker yang di-fork mewarisi cache ini tanpa
+    salinan tambahan (copy-on-write) alih-alih memuat ulang dari disk.
+    """
+    return {
+        row["uid"]: load_normalized_resized(row["roi_path"], size=size)
+        for _, row in manifest.iterrows()
+    }
+
+
+def load_roi_tensor(
+    roi_path: str, size: int = 224, augment: bool = False, cached_rgb: np.ndarray | None = None,
+) -> torch.Tensor:
     """Muat citra region of interest, ubah ukuran, dan normalisasi gaya ImageNet.
 
     Dipakai bersama oleh ROIImageDataset dan dataset pelatihan end-to-end agar
     logika pemuatan citra tidak terduplikasi. Augmentasi hanya diterapkan bila
-    augment=True, dipakai pada split train saat fine-tuning end-to-end.
+    augment=True, dipakai pada split train saat fine-tuning end-to-end. Bila
+    cached_rgb diisi (dari precompute_normalized_images), langkah normalize_roi
+    dan resize dilewati dan hasil cache dipakai langsung sebelum augmentasi.
     """
-    normalized = normalize_roi(roi_path)
-    rgb = cv2.resize(normalized["rgb"], (size, size), interpolation=cv2.INTER_AREA)
+    if cached_rgb is not None:
+        rgb = cached_rgb
+    else:
+        rgb = load_normalized_resized(roi_path, size=size)
     if augment:
         rgb = _augment_roi(rgb)
     rgb_float = rgb.astype(np.float32) / 255.0

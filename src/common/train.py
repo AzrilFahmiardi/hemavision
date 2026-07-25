@@ -463,20 +463,24 @@ class EndToEndDataset(Dataset):
     """
 
     def __init__(self, frame: pd.DataFrame, static_features: np.ndarray, severity_ordinal: np.ndarray,
-                 has_severity: np.ndarray, size: int = 224, augment: bool = False):
+                 has_severity: np.ndarray, size: int = 224, augment: bool = False, image_cache: dict | None = None):
         self.rows = frame.reset_index(drop=True)
         self.static_features = static_features
         self.severity_ordinal = severity_ordinal
         self.has_severity = has_severity
         self.size = size
         self.augment = augment
+        self.image_cache = image_cache
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, index):
         row = self.rows.iloc[index]
-        image = features.load_roi_tensor(row["roi_path"], size=self.size, augment=self.augment)
+        cached_rgb = self.image_cache.get(row["uid"]) if self.image_cache is not None else None
+        image = features.load_roi_tensor(
+            row["roi_path"], size=self.size, augment=self.augment, cached_rgb=cached_rgb,
+        )
         static = torch.tensor(self.static_features[index], dtype=torch.float32)
         hb = torch.tensor(row["hb_gdl"], dtype=torch.float32)
         anemic = torch.tensor(row["anemic"], dtype=torch.long)
@@ -523,6 +527,7 @@ def run_kfold_end_to_end(
     severity_ordinal = _severity_to_ordinal(manifest["severity"])
     has_severity = severity_ordinal >= 0
     site_categories = sorted(manifest["site"].unique().tolist())
+    image_cache = features.precompute_normalized_images(manifest, size=image_size)
 
     oof_records = []
     fold_metrics = []
@@ -548,10 +553,12 @@ def run_kfold_end_to_end(
         val_has_severity = has_severity[val_mask.to_numpy()]
 
         train_dataset = EndToEndDataset(
-            train_manifest, train_static, train_severity, train_has_severity, size=image_size, augment=augment,
+            train_manifest, train_static, train_severity, train_has_severity,
+            size=image_size, augment=augment, image_cache=image_cache,
         )
         val_dataset = EndToEndDataset(
-            val_manifest, val_static, val_severity, val_has_severity, size=image_size, augment=False,
+            val_manifest, val_static, val_severity, val_has_severity,
+            size=image_size, augment=False, image_cache=image_cache,
         )
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
