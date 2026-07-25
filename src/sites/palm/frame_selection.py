@@ -22,6 +22,7 @@ from mediapipe.tasks.python.core.base_options import BaseOptions
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from configs.paths import artifacts_dir
+from src.sites.palm.roi import YCBCR_LOWER, YCBCR_UPPER
 
 HAND_LANDMARKER_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
@@ -130,7 +131,7 @@ def extract_best_frame(
     capture.release()
 
     if not candidates:
-        return None
+        return _extract_best_frame_skin_fallback(video_path)
 
     openness_values = np.array([candidate["openness"] for candidate in candidates])
     sharpness_values = np.array([candidate["sharpness"] for candidate in candidates])
@@ -151,4 +152,69 @@ def extract_best_frame(
         "openness": best["openness"],
         "sharpness": best["sharpness"],
         "brightness": best["brightness"],
+        "detection_method": "landmark",
+    }
+
+
+def _skin_ratio(frame_rgb: np.ndarray) -> float:
+    """Rasio piksel bernuansa kulit pada seluruh frame (rentang YCbCr Peksi dkk. 2021)."""
+    ycrcb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2YCrCb)
+    ycbcr = ycrcb[:, :, [0, 2, 1]]
+    mask = cv2.inRange(ycbcr, YCBCR_LOWER, YCBCR_UPPER) > 0
+    return float(mask.mean())
+
+
+def _extract_best_frame_skin_fallback(video_path: str, sample_stride: int = 2) -> dict | None:
+    """Pilih frame terbaik lewat rasio warna kulit bila tidak ada tangan terdeteksi MediaPipe.
+
+    Sebagian video merekam telapak tangan dalam close-up ekstrem sehingga jari
+    dan pergelangan terpotong di luar frame, membuat detektor tangan MediaPipe
+    (yang mengandalkan siluet tangan penuh) gagal mengenali objek. Fallback ini
+    tidak bergantung pada landmark, menilai rasio piksel kulit, ketajaman, dan
+    kecerahan untuk memilih satu frame representatif, agar video semacam ini
+    tidak hilang dari manifest dan tidak membuat distribusi label bias.
+    """
+    capture = cv2.VideoCapture(str(video_path))
+    candidates = []
+    frame_index = 0
+    while True:
+        success, frame_bgr = capture.read()
+        if not success:
+            break
+        if frame_index % sample_stride == 0:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+            candidates.append({
+                "frame_index": frame_index,
+                "frame": frame_rgb,
+                "skin_ratio": _skin_ratio(frame_rgb),
+                "sharpness": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
+                "brightness": float(gray.mean()),
+            })
+        frame_index += 1
+    capture.release()
+
+    if not candidates:
+        return None
+
+    skin_values = np.array([candidate["skin_ratio"] for candidate in candidates])
+    sharpness_values = np.array([candidate["sharpness"] for candidate in candidates])
+    skin_normalized = (skin_values - skin_values.min()) / (np.ptp(skin_values) + 1e-6)
+    sharpness_normalized = (sharpness_values - sharpness_values.min()) / (np.ptp(sharpness_values) + 1e-6)
+    in_range = np.array([
+        MIN_BRIGHTNESS <= candidate["brightness"] <= MAX_BRIGHTNESS for candidate in candidates
+    ])
+
+    composite = OPENNESS_WEIGHT * skin_normalized + SHARPNESS_WEIGHT * sharpness_normalized
+    composite = np.where(in_range, composite, composite - 1.0)
+
+    best = candidates[int(np.argmax(composite))]
+    return {
+        "frame": best["frame"],
+        "landmarks_px": None,
+        "frame_index": best["frame_index"],
+        "openness": best["skin_ratio"],
+        "sharpness": best["sharpness"],
+        "brightness": best["brightness"],
+        "detection_method": "skin_fallback",
     }

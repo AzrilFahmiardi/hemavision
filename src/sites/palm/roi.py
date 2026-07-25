@@ -12,8 +12,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-YCBCR_LOWER = np.array([0, 133, 77], dtype=np.uint8)
-YCBCR_UPPER = np.array([255, 173, 127], dtype=np.uint8)
+YCBCR_LOWER = np.array([0, 77, 133], dtype=np.uint8)
+YCBCR_UPPER = np.array([255, 127, 173], dtype=np.uint8)
 HULL_DILATION_PX = 8
 MIN_SKIN_PIXELS = 300
 
@@ -35,6 +35,38 @@ def _skin_color_mask(rgb: np.ndarray) -> np.ndarray:
     ycrcb = cv2.cvtColor(rgb, cv2.COLOR_RGB2YCrCb)
     ycbcr = ycrcb[:, :, [0, 2, 1]]
     return cv2.inRange(ycbcr, YCBCR_LOWER, YCBCR_UPPER) > 0
+
+
+def palm_mask_skin_only(frame: np.ndarray) -> dict:
+    """Bangun mask region of interest palm dari warna kulit saja, tanpa landmark tangan.
+
+    Dipakai untuk video close-up ekstrem yang membuat MediaPipe HandLandmarker
+    gagal mendeteksi tangan (jari dan pergelangan terpotong di luar frame).
+    Mask dibersihkan dengan closing morfologis agar celah pada garis telapak
+    tangan tidak membelah region kulit menjadi beberapa bagian kecil, lalu
+    hanya komponen terhubung terbesar yang dipakai sebagai ROI.
+    """
+    skin_mask = _skin_color_mask(frame)
+    kernel = np.ones((15, 15), np.uint8)
+    closed_mask = cv2.morphologyEx(skin_mask.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel)
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(closed_mask, connectivity=8)
+    if num_labels <= 1:
+        combined_mask = closed_mask > 0
+    else:
+        largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        combined_mask = labels == largest_label
+
+    if not combined_mask.any():
+        combined_mask = np.ones(frame.shape[:2], dtype=bool)
+
+    rows = np.where(combined_mask.any(axis=1))[0]
+    cols = np.where(combined_mask.any(axis=0))[0]
+    top, bottom = rows[0], rows[-1]
+    left, right = cols[0], cols[-1]
+    cropped_rgb = frame[top:bottom + 1, left:right + 1]
+    cropped_mask = combined_mask[top:bottom + 1, left:right + 1]
+    return {"rgb": cropped_rgb, "mask": cropped_mask}
 
 
 def palm_mask_from_landmarks(frame: np.ndarray, landmarks_px: np.ndarray) -> dict:
