@@ -1,0 +1,15 @@
+.git/
+dataset/
+notebooks/
+assets/
+docs/
+reference/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+requirements.txt
+environment.yml
+artifacts/*/end_to_end*.pt
+artifacts/*/multitask_full_fusion_resnet18_tuned_fold[1-4].pt
+artifacts/*/multitask_full_fusion_resnet18_fold[1-4].pt

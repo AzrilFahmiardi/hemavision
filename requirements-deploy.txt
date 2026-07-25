@@ -1,0 +1,10 @@
+numpy
+pandas
+opencv-python-headless
+pillow
+albumentations
+segmentation-models-pytorch
+mediapipe
+fastapi
+uvicorn
+python-multipart
