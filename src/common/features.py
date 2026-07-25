@@ -277,14 +277,49 @@ class EmbeddingBackbone(nn.Module):
         return self.projection(x)
 
 
-def load_roi_tensor(roi_path: str, size: int = 224) -> torch.Tensor:
+MAX_ROTATION_DEGREES = 15.0
+BRIGHTNESS_JITTER = 0.15
+CONTRAST_JITTER = 0.15
+
+
+def _augment_roi(rgb: np.ndarray) -> np.ndarray:
+    """Augmentasi ringan untuk fine-tuning end-to-end, dijalankan hanya pada split train.
+
+    Hanya memakai transformasi geometris (flip, rotasi kecil) dan jitter
+    brightness/contrast ringan. Sengaja tidak memakai hue/saturation/color
+    jitter karena warna kulit (pallor, erythema index) adalah sinyal diagnostik
+    utama yang ingin dipelajari model, bukan noise yang boleh dirusak.
+    """
+    if np.random.rand() < 0.5:
+        rgb = np.ascontiguousarray(rgb[:, ::-1, :])
+
+    angle = np.random.uniform(-MAX_ROTATION_DEGREES, MAX_ROTATION_DEGREES)
+    height, width = rgb.shape[:2]
+    rotation_matrix = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1.0)
+    rgb = cv2.warpAffine(
+        rgb, rotation_matrix, (width, height),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101,
+    )
+
+    brightness_factor = 1.0 + np.random.uniform(-BRIGHTNESS_JITTER, BRIGHTNESS_JITTER)
+    contrast_factor = 1.0 + np.random.uniform(-CONTRAST_JITTER, CONTRAST_JITTER)
+    rgb_float = rgb.astype(np.float32) * brightness_factor
+    mean_intensity = rgb_float.mean()
+    rgb_float = (rgb_float - mean_intensity) * contrast_factor + mean_intensity
+    return np.clip(rgb_float, 0.0, 255.0).astype(np.uint8)
+
+
+def load_roi_tensor(roi_path: str, size: int = 224, augment: bool = False) -> torch.Tensor:
     """Muat citra region of interest, ubah ukuran, dan normalisasi gaya ImageNet.
 
     Dipakai bersama oleh ROIImageDataset dan dataset pelatihan end-to-end agar
-    logika pemuatan citra tidak terduplikasi.
+    logika pemuatan citra tidak terduplikasi. Augmentasi hanya diterapkan bila
+    augment=True, dipakai pada split train saat fine-tuning end-to-end.
     """
     normalized = normalize_roi(roi_path)
     rgb = cv2.resize(normalized["rgb"], (size, size), interpolation=cv2.INTER_AREA)
+    if augment:
+        rgb = _augment_roi(rgb)
     rgb_float = rgb.astype(np.float32) / 255.0
     rgb_float = (rgb_float - IMAGENET_MEAN) / IMAGENET_STD
     return torch.from_numpy(rgb_float.transpose(2, 0, 1)).float()

@@ -20,7 +20,9 @@ from torch.utils.data import DataLoader, Dataset
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.common import features
 from src.common.features import EMBEDDING_DIM, build_fusion_input, compute_fusion_stats, freeze_backbone_body
-from src.common.models import CornLoss, DualLoss, EndToEndModel, FocalLoss, HemavisionModel, SEVERITY_ORDER
+from src.common.models import (
+    CornLoss, DualLoss, EndToEndModel, FocalLoss, HemavisionModel, SEVERITY_CLASSES, SEVERITY_ORDER,
+)
 
 
 def _select_embeddings(embedding_uids, embeddings, target_uids) -> np.ndarray:
@@ -100,6 +102,7 @@ def run_kfold(
     use_demographics: bool = True,
     use_site_token: bool = True,
     regression_loss: str = "dual",
+    weight_severity_classes: bool = False,
     device: str | None = None,
     seed: int = 42,
 ) -> dict:
@@ -108,9 +111,12 @@ def run_kfold(
     Manifest harus sudah memiliki kolom fold dari assign_kfold. Parameter
     use_fusion_attention, use_demographics, use_site_token, dan regression_loss
     (dual atau mse_only) memungkinkan ablation komponen arsitektur satu per
-    satu dengan protokol pelatihan yang identik. Mengembalikan prediksi
-    out-of-fold untuk seluruh sampel, metrik ringkas per fold, dan daftar model
-    terlatih per fold untuk keperluan penyimpanan checkpoint.
+    satu dengan protokol pelatihan yang identik. weight_severity_classes
+    mengaktifkan bobot kelas berbanding terbalik dengan frekuensi pada CornLoss,
+    berguna ketika kelas severity minoritas (misalnya Moderate) jarang muncul.
+    Mengembalikan prediksi out-of-fold untuk seluruh sampel, metrik ringkas per
+    fold, dan daftar model terlatih per fold untuk keperluan penyimpanan
+    checkpoint.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     weight_regression, weight_classification, weight_severity = loss_weights
@@ -173,7 +179,13 @@ def run_kfold(
             )
         classification_alpha = _class_weights(train_anemic, num_classes=2)
         classification_loss_fn = FocalLoss(gamma=focal_gamma, alpha=classification_alpha)
-        severity_loss_fn = CornLoss()
+        if weight_severity_classes and train_has_severity.any():
+            severity_class_weights = _class_weights(
+                train_severity[train_has_severity], num_classes=SEVERITY_CLASSES
+            )
+        else:
+            severity_class_weights = None
+        severity_loss_fn = CornLoss(class_weights=severity_class_weights)
 
         train_features_tensor = torch.tensor(train_features, dtype=torch.float32, device=device)
         train_hb_tensor = torch.tensor(train_hb, dtype=torch.float32, device=device)
@@ -451,19 +463,20 @@ class EndToEndDataset(Dataset):
     """
 
     def __init__(self, frame: pd.DataFrame, static_features: np.ndarray, severity_ordinal: np.ndarray,
-                 has_severity: np.ndarray, size: int = 224):
+                 has_severity: np.ndarray, size: int = 224, augment: bool = False):
         self.rows = frame.reset_index(drop=True)
         self.static_features = static_features
         self.severity_ordinal = severity_ordinal
         self.has_severity = has_severity
         self.size = size
+        self.augment = augment
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, index):
         row = self.rows.iloc[index]
-        image = features.load_roi_tensor(row["roi_path"], size=self.size)
+        image = features.load_roi_tensor(row["roi_path"], size=self.size, augment=self.augment)
         static = torch.tensor(self.static_features[index], dtype=torch.float32)
         hb = torch.tensor(row["hb_gdl"], dtype=torch.float32)
         anemic = torch.tensor(row["anemic"], dtype=torch.long)
@@ -486,6 +499,8 @@ def run_kfold_end_to_end(
     focal_gamma: float = 2.0,
     image_size: int = 224,
     backbone_name: str = "resnet18",
+    augment: bool = False,
+    weight_severity_classes: bool = False,
     device: str | None = None,
     seed: int = 42,
 ) -> dict:
@@ -494,8 +509,13 @@ def run_kfold_end_to_end(
     Berbeda dari run_kfold yang memakai deep embedding yang sudah dibekukan,
     fungsi ini memuat citra langsung dan melatih CSA beserta layer proyeksi
     lewat backpropagation penuh, sehingga atensi yang dihasilkan benar-benar
-    dipelajari dari data konjungtiva, bukan inisialisasi acak. Badan backbone
-    (early dan late) tetap dibekukan mengikuti freeze_backbone_body.
+    dipelajari dari data, bukan inisialisasi acak. Badan backbone (early dan
+    late) tetap dibekukan mengikuti freeze_backbone_body. augment mengaktifkan
+    augmentasi citra ringan (flip, rotasi kecil, brightness/contrast) pada
+    split train saja, dipakai untuk mengurangi overfitting dibanding percobaan
+    fine-tuning end-to-end sebelumnya yang tidak memakai augmentasi sama sekali.
+    weight_severity_classes mengaktifkan bobot kelas pada CornLoss, sama seperti
+    pada run_kfold.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     weight_regression, weight_classification, weight_severity = loss_weights
@@ -527,8 +547,12 @@ def run_kfold_end_to_end(
         train_has_severity = has_severity[train_mask.to_numpy()]
         val_has_severity = has_severity[val_mask.to_numpy()]
 
-        train_dataset = EndToEndDataset(train_manifest, train_static, train_severity, train_has_severity, size=image_size)
-        val_dataset = EndToEndDataset(val_manifest, val_static, val_severity, val_has_severity, size=image_size)
+        train_dataset = EndToEndDataset(
+            train_manifest, train_static, train_severity, train_has_severity, size=image_size, augment=augment,
+        )
+        val_dataset = EndToEndDataset(
+            val_manifest, val_static, val_severity, val_has_severity, size=image_size, augment=False,
+        )
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2)
         val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
@@ -544,7 +568,13 @@ def run_kfold_end_to_end(
         dual_loss_fn = DualLoss(gamma=focal_gamma)
         classification_alpha = _class_weights(train_manifest["anemic"].to_numpy(dtype=np.int64), num_classes=2)
         classification_loss_fn = FocalLoss(gamma=focal_gamma, alpha=classification_alpha)
-        severity_loss_fn = CornLoss()
+        if weight_severity_classes and train_has_severity.any():
+            severity_class_weights = _class_weights(
+                train_severity[train_has_severity], num_classes=SEVERITY_CLASSES
+            )
+        else:
+            severity_class_weights = None
+        severity_loss_fn = CornLoss(class_weights=severity_class_weights)
 
         model.train()
         for _ in range(epochs):

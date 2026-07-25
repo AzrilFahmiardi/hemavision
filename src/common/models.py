@@ -78,13 +78,19 @@ class CornLoss(nn.Module):
     Model diharapkan mengeluarkan K minus satu logit untuk problem ordinal
     dengan K kelas. Logit ke-k dilatih secara kondisional hanya pada sampel
     dengan label asli lebih besar atau sama dengan k, mengikuti formulasi CORN
-    (Shi, Cao, dan Raschka).
+    (Shi, Cao, dan Raschka). Bobot kelas opsional (berbanding terbalik dengan
+    frekuensi kelas asli, bukan kelas biner tiap ambang) dipakai untuk
+    mengangkat kontribusi kelas severity minoritas yang jarang muncul.
     """
+
+    def __init__(self, class_weights: torch.Tensor | None = None):
+        super().__init__()
+        self.class_weights = class_weights
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         num_thresholds = logits.shape[1]
         total_loss = logits.new_zeros(())
-        total_count = 0
+        total_weight = logits.new_zeros(())
         for threshold in range(num_thresholds):
             conditional_mask = targets >= threshold
             count = int(conditional_mask.sum().item())
@@ -92,13 +98,18 @@ class CornLoss(nn.Module):
                 continue
             binary_target = (targets[conditional_mask] > threshold).float()
             binary_logit = logits[conditional_mask, threshold]
-            total_loss = total_loss + F.binary_cross_entropy_with_logits(
-                binary_logit, binary_target, reduction="sum"
+            sample_loss = F.binary_cross_entropy_with_logits(
+                binary_logit, binary_target, reduction="none"
             )
-            total_count += count
-        if total_count == 0:
+            if self.class_weights is not None:
+                sample_weight = self.class_weights.to(logits.device)[targets[conditional_mask]]
+            else:
+                sample_weight = torch.ones_like(sample_loss)
+            total_loss = total_loss + (sample_loss * sample_weight).sum()
+            total_weight = total_weight + sample_weight.sum()
+        if total_weight.item() == 0:
             return logits.new_zeros(())
-        return total_loss / total_count
+        return total_loss / total_weight
 
     @staticmethod
     def predict_rank(logits: torch.Tensor) -> torch.Tensor:
