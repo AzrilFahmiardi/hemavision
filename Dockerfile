@@ -18,6 +18,9 @@ COPY artifacts/palm/embedding_backbone_resnet18.pt artifacts/palm/embedding_back
 COPY artifacts/palm/multitask_full_fusion_resnet18_fold0.pt artifacts/palm/multitask_full_fusion_resnet18_fold0.pt
 COPY artifacts/palm/fusion_stats.json artifacts/palm/fusion_stats.json
 COPY artifacts/palm/hand_landmarker.task artifacts/palm/hand_landmarker.task
+COPY artifacts/nail/embedding_backbone_resnet18.pt artifacts/nail/embedding_backbone_resnet18.pt
+COPY artifacts/nail/multitask_path_b_deep_resnet18_fold0.pt artifacts/nail/multitask_path_b_deep_resnet18_fold0.pt
+COPY artifacts/nail/fusion_stats.json artifacts/nail/fusion_stats.json
 
 ENV PORT=8080
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

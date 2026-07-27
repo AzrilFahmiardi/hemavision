@@ -464,6 +464,7 @@ def build_fusion_input(
     use_deep: bool = True,
     use_demographics: bool = True,
     use_site_token: bool = True,
+    extra_columns: list[str] | None = None,
 ) -> np.ndarray:
     """Susun vektor fusi dari fitur hand-crafted, deep embedding, demografi, dan site token.
 
@@ -480,9 +481,17 @@ def build_fusion_input(
     penuh, sehingga perbandingan antar konfigurasi tetap adil. Parameter
     use_demographics dan use_site_token memungkinkan ablation komponen umur dan
     gender, atau site token, secara terpisah.
+
+    Parameter extra_columns bersifat opsional dan situs-agnostik, dipakai untuk
+    menambahkan kolom kategorikal/biner khusus situs dari manifest (misalnya
+    polish_flag pada situs nail) tanpa mem-fork fungsi ini. Kosong secara
+    default sehingga tidak mengubah perilaku situs yang sudah ada.
     """
     stats = stats or compute_fusion_stats(handcrafted, manifest)
-    merged = manifest[["uid", "age_years", "gender", "site"]].merge(handcrafted, on="uid", how="left")
+    extra_columns = extra_columns or []
+    merged = manifest[["uid", "age_years", "gender", "site"] + extra_columns].merge(
+        handcrafted, on="uid", how="left"
+    )
 
     blocks = []
     if use_handcrafted:
@@ -498,6 +507,9 @@ def build_fusion_input(
         site_categorical = pd.Categorical(merged["site"], categories=stats["site_categories"])
         site_dummies = pd.get_dummies(site_categorical).to_numpy(dtype=np.float32)
         blocks.append(site_dummies)
+    if extra_columns:
+        extra_values = merged[extra_columns].astype(np.float32).fillna(0.0).to_numpy()
+        blocks.append(extra_values)
 
     return np.concatenate(blocks, axis=1)
 

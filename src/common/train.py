@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.metrics import balanced_accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -43,6 +44,18 @@ def _class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor:
     counts = np.clip(counts, 1.0, None)
     weights = counts.sum() / (num_classes * counts)
     return torch.tensor(weights, dtype=torch.float32)
+
+
+def _safe_auc(true_labels: np.ndarray, predicted_probability: np.ndarray) -> float:
+    """Hitung ROC AUC, mengembalikan NaN bila fold hanya berisi satu kelas.
+
+    Dilaporkan berdampingan dengan accuracy karena AUC tidak bergantung pada
+    ambang keputusan dan prevalensi kelas, sehingga tidak menyesatkan seperti
+    accuracy pada dataset anemia yang timpang (mayoritas non-anemic).
+    """
+    if len(np.unique(true_labels)) < 2:
+        return float("nan")
+    return float(roc_auc_score(true_labels, predicted_probability))
 
 
 def _iterate_batches(n_rows: int, batch_size: int, rng: np.random.Generator):
@@ -101,6 +114,7 @@ def run_kfold(
     use_fusion_attention: bool = True,
     use_demographics: bool = True,
     use_site_token: bool = True,
+    extra_columns: list[str] | None = None,
     regression_loss: str = "dual",
     weight_severity_classes: bool = False,
     device: str | None = None,
@@ -111,12 +125,15 @@ def run_kfold(
     Manifest harus sudah memiliki kolom fold dari assign_kfold. Parameter
     use_fusion_attention, use_demographics, use_site_token, dan regression_loss
     (dual atau mse_only) memungkinkan ablation komponen arsitektur satu per
-    satu dengan protokol pelatihan yang identik. weight_severity_classes
+    satu dengan protokol pelatihan yang identik. extra_columns diteruskan apa
+    adanya ke build_fusion_input untuk menambah fitur kategorikal khusus situs
+    (misalnya polish_flag pada nail) tanpa mengubah situs lain. weight_severity_classes
     mengaktifkan bobot kelas berbanding terbalik dengan frekuensi pada CornLoss,
     berguna ketika kelas severity minoritas (misalnya Moderate) jarang muncul.
     Mengembalikan prediksi out-of-fold untuk seluruh sampel, metrik ringkas per
-    fold, dan daftar model terlatih per fold untuk keperluan penyimpanan
-    checkpoint.
+    fold (termasuk precision, recall, dan f1 klasifikasi anemia karena akurasi
+    saja tidak sensitif terhadap ketidakseimbangan kelas), dan daftar model
+    terlatih per fold untuk keperluan penyimpanan checkpoint.
     """
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     weight_regression, weight_classification, weight_severity = loss_weights
@@ -146,11 +163,13 @@ def run_kfold(
             handcrafted, train_deep, train_manifest, stats=stats,
             use_handcrafted=use_handcrafted, use_deep=use_deep,
             use_demographics=use_demographics, use_site_token=use_site_token,
+            extra_columns=extra_columns,
         )
         val_features = build_fusion_input(
             handcrafted, val_deep, val_manifest, stats=stats,
             use_handcrafted=use_handcrafted, use_deep=use_deep,
             use_demographics=use_demographics, use_site_token=use_site_token,
+            extra_columns=extra_columns,
         )
 
         train_hb = train_manifest["hb_gdl"].to_numpy(dtype=np.float32)
@@ -236,6 +255,11 @@ def run_kfold(
         mae = float(np.mean(np.abs(predicted_hb - val_hb)))
         rmse = float(np.sqrt(np.mean((predicted_hb - val_hb) ** 2)))
         accuracy = float(np.mean(predicted_anemic == val_anemic))
+        precision = float(precision_score(val_anemic, predicted_anemic, zero_division=0))
+        recall = float(recall_score(val_anemic, predicted_anemic, zero_division=0))
+        f1 = float(f1_score(val_anemic, predicted_anemic, zero_division=0))
+        auc = _safe_auc(val_anemic, predicted_anemic_prob)
+        balanced_accuracy = float(balanced_accuracy_score(val_anemic, predicted_anemic))
         if val_has_severity.any():
             severity_accuracy = float(
                 np.mean(predicted_severity[val_has_severity] == val_severity[val_has_severity])
@@ -249,6 +273,11 @@ def run_kfold(
             "mae": mae,
             "rmse": rmse,
             "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "auc": auc,
+            "balanced_accuracy": balanced_accuracy,
             "severity_accuracy": severity_accuracy,
         })
 
@@ -611,6 +640,7 @@ def run_kfold_end_to_end(
         n_val = len(val_manifest)
         predicted_hb = np.zeros(n_val, dtype=np.float32)
         predicted_anemic = np.zeros(n_val, dtype=np.int64)
+        predicted_anemic_prob = np.zeros(n_val, dtype=np.float32)
         predicted_severity = np.zeros(n_val, dtype=np.int64)
         position = 0
         with torch.no_grad():
@@ -621,6 +651,9 @@ def run_kfold_end_to_end(
                 predicted_hb[position:position + batch_n] = outputs["expected_hb"].cpu().numpy()
                 predicted_anemic[position:position + batch_n] = (
                     outputs["classification_logits"].argmax(dim=1).cpu().numpy()
+                )
+                predicted_anemic_prob[position:position + batch_n] = (
+                    torch.softmax(outputs["classification_logits"], dim=1)[:, 1].cpu().numpy()
                 )
                 predicted_severity[position:position + batch_n] = (
                     CornLoss.predict_rank(outputs["severity_logits"]).cpu().numpy()
@@ -633,6 +666,11 @@ def run_kfold_end_to_end(
         mae = float(np.mean(np.abs(predicted_hb - val_hb)))
         rmse = float(np.sqrt(np.mean((predicted_hb - val_hb) ** 2)))
         accuracy = float(np.mean(predicted_anemic == val_anemic))
+        precision = float(precision_score(val_anemic, predicted_anemic, zero_division=0))
+        recall = float(recall_score(val_anemic, predicted_anemic, zero_division=0))
+        f1 = float(f1_score(val_anemic, predicted_anemic, zero_division=0))
+        auc = _safe_auc(val_anemic, predicted_anemic_prob)
+        balanced_accuracy = float(balanced_accuracy_score(val_anemic, predicted_anemic))
         if val_has_severity.any():
             severity_accuracy = float(
                 np.mean(predicted_severity[val_has_severity] == val_severity[val_has_severity])
@@ -646,6 +684,11 @@ def run_kfold_end_to_end(
             "mae": mae,
             "rmse": rmse,
             "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "auc": auc,
+            "balanced_accuracy": balanced_accuracy,
             "severity_accuracy": severity_accuracy,
         })
 
@@ -657,6 +700,7 @@ def run_kfold_end_to_end(
                 "hb_pred": float(predicted_hb[row_position]),
                 "anemic_true": int(val_anemic[row_position]),
                 "anemic_pred": int(predicted_anemic[row_position]),
+                "anemic_prob": float(predicted_anemic_prob[row_position]),
                 "severity_true": int(val_severity[row_position]),
                 "severity_pred": int(predicted_severity[row_position]),
             })

@@ -13,3 +13,13 @@ environment.yml
 artifacts/*/end_to_end*.pt
 artifacts/*/multitask_full_fusion_resnet18_tuned_fold[1-4].pt
 artifacts/*/multitask_full_fusion_resnet18_fold[1-4].pt
+artifacts/nail/multitask_path_b_deep_resnet18_fold[1-4].pt
+artifacts/nail/end_to_end_*.pt
+artifacts/nail/multitask_classification_emphasis_*.pt
+artifacts/nail/multitask_full_fusion_fold*.pt
+artifacts/nail/multitask_full_fusion_polish_*.pt
+artifacts/nail/multitask_full_fusion_small_trunk_*.pt
+artifacts/nail/multitask_full_fusion_tuned_*.pt
+artifacts/nail/multitask_no_severity_head_*.pt
+artifacts/nail/multitask_path_a_handcrafted_*.pt
+artifacts/nail/multitask_path_b_deep_fold*.pt
