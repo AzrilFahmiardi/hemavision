@@ -11,7 +11,9 @@ __pycache__/
 requirements.txt
 environment.yml
 artifacts/*/end_to_end*.pt
-artifacts/*/multitask_full_fusion_resnet18_tuned_fold[1-4].pt
+artifacts/conjunctiva/multitask_full_fusion_resnet18_tuned_fold1.pt
+artifacts/conjunctiva/multitask_full_fusion_resnet18_tuned_fold3.pt
+artifacts/conjunctiva/multitask_full_fusion_resnet18_tuned_fold4.pt
 artifacts/*/multitask_full_fusion_resnet18_fold[1-4].pt
 artifacts/nail/multitask_path_b_deep_resnet18_fold[1-4].pt
 artifacts/nail/end_to_end_*.pt
