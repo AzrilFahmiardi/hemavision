@@ -218,3 +218,44 @@ def _extract_best_frame_skin_fallback(video_path: str, sample_stride: int = 2) -
         "brightness": best["brightness"],
         "detection_method": "skin_fallback",
     }
+
+
+def detect_hand_in_image(
+    image_rgb: np.ndarray,
+    min_detection_confidence: float = 0.5,
+) -> dict:
+    """Deteksi tangan pada satu foto tunggal, padanan extract_best_frame untuk input foto.
+
+    Hanya ada satu kandidat sehingga tidak ada pemilihan frame terbaik seperti
+    pada video, cukup satu kali deteksi landmark. Bila landmark tidak
+    ditemukan, foto tetap diterima lewat jalur skin_fallback tanpa syarat
+    rasio kulit minimum, meniru perilaku _extract_best_frame_skin_fallback
+    yang juga tidak pernah menolak kandidat selama gambarnya terbaca.
+    """
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(_hand_landmarker_model_path())),
+        running_mode=mp_vision.RunningMode.IMAGE,
+        num_hands=1,
+        min_hand_detection_confidence=min_detection_confidence,
+    )
+    with mp_vision.HandLandmarker.create_from_options(options) as landmarker:
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
+        result = landmarker.detect(mp_image)
+
+    if result.hand_landmarks:
+        height, width = image_rgb.shape[:2]
+        landmark = result.hand_landmarks[0]
+        landmarks_px = np.array(
+            [[point.x * width, point.y * height] for point in landmark]
+        )
+        return {
+            "frame": image_rgb,
+            "landmarks_px": landmarks_px,
+            "detection_method": "landmark",
+        }
+
+    return {
+        "frame": image_rgb,
+        "landmarks_px": None,
+        "detection_method": "skin_fallback",
+    }
