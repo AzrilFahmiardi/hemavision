@@ -56,6 +56,31 @@ def valid_pixel_mask(rgb, roi, low: int = 20, high: int = 240):
     return in_range & roi
 
 
+CANONICAL_ROI_WIDTH = 800
+"""Lebar acuan region of interest sebelum ekstraksi fitur hand-crafted.
+
+Fitur tekstur (g1 hingga g5) dihitung dari jendela tetangga 3x3 pixel sehingga
+tidak scale invariant, nilainya bergantung pada resolusi absolut citra, bukan
+hanya rasio aspek. Data latih Eyes-Defy secara konsisten tersimpan pada lebar
+800 pixel. Foto mentah dari kamera ponsel biasanya beresolusi jauh lebih
+tinggi, sehingga tanpa disamakan resolusinya lebih dulu, fitur tekstur yang
+dihasilkan akan berada di luar sebaran nilai yang dipelajari model saat
+pelatihan. Region of interest karena itu diubah ukurannya ke lebar acuan ini
+sebelum ekstraksi fitur, konsisten dengan skala resolusi data latih.
+"""
+
+
+def resize_to_canonical_resolution(rgb: np.ndarray, mask: np.ndarray, width: int = CANONICAL_ROI_WIDTH):
+    """Ubah ukuran region of interest ke lebar acuan sambil mempertahankan rasio aspek."""
+    if rgb.shape[1] == width:
+        return rgb, mask
+    scale = width / rgb.shape[1]
+    new_size = (width, max(1, round(rgb.shape[0] * scale)))
+    resized_rgb = cv2.resize(rgb, new_size, interpolation=cv2.INTER_AREA)
+    resized_mask = cv2.resize(mask.astype(np.uint8), new_size, interpolation=cv2.INTER_NEAREST).astype(bool)
+    return resized_rgb, resized_mask
+
+
 def normalize_roi(path: str, crop: bool = True, clip_limit: float = 2.0):
     """Pipeline normalisasi untuk satu citra region of interest.
 

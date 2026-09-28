@@ -147,6 +147,82 @@ def quality_check(path: str, thresholds: dict | None = None) -> dict:
     return metrics
 
 
+ROI_GEOMETRY_THRESHOLDS = {
+    "max_components": 3,
+    "max_aspect_ratio": 5.0,
+    "min_solidity": 0.4,
+    "min_roi_coverage": 0.02,
+    "max_roi_coverage": 0.95,
+}
+
+
+def validate_roi_geometry(
+    mask: np.ndarray,
+    raw_frame_shape: tuple[int, ...],
+    thresholds: dict | None = None,
+) -> list[str]:
+    """Validasi geometri mask ROI terhadap frame mentah.
+
+    Memeriksa empat properti geometris yang menangkap kasus ROI lolos
+    pengecekan piksel absolut tetapi secara bentuk tidak masuk akal sebagai
+    region anatomis yang valid, misalnya mask terfragmentasi, terlalu tipis,
+    berlubang, atau hanya mencakup potongan kecil dari frame.
+
+    Mengembalikan list string reason untuk setiap pemeriksaan yang gagal.
+    List kosong berarti geometri mask dianggap wajar.
+    """
+    limits = dict(ROI_GEOMETRY_THRESHOLDS)
+    if thresholds:
+        limits.update(thresholds)
+
+    reasons: list[str] = []
+    mask_uint8 = mask.astype(np.uint8) if mask.dtype != np.uint8 else mask
+
+    roi_pixels = int(mask_uint8.sum()) if mask.dtype == bool else int((mask_uint8 > 0).sum())
+    if roi_pixels < 10:
+        reasons.append("roi_coverage_low")
+        return reasons
+
+    binary = (mask_uint8 > 0).astype(np.uint8) if mask.dtype != bool else mask_uint8
+
+    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    foreground_components = num_labels - 1
+    if foreground_components > limits["max_components"]:
+        reasons.append("roi_fragmented")
+
+    if foreground_components > 0:
+        component_areas = stats[1:, cv2.CC_STAT_AREA]
+        largest_idx = int(np.argmax(component_areas)) + 1
+        x = stats[largest_idx, cv2.CC_STAT_LEFT]
+        y = stats[largest_idx, cv2.CC_STAT_TOP]
+        w = stats[largest_idx, cv2.CC_STAT_WIDTH]
+        h = stats[largest_idx, cv2.CC_STAT_HEIGHT]
+        if w > 0 and h > 0:
+            aspect = max(w, h) / max(min(w, h), 1)
+            if aspect > limits["max_aspect_ratio"]:
+                reasons.append("roi_too_thin")
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        all_points = np.concatenate(contours)
+        hull = cv2.convexHull(all_points)
+        hull_area = cv2.contourArea(hull)
+        if hull_area > 0:
+            solidity = roi_pixels / hull_area
+            if solidity < limits["min_solidity"]:
+                reasons.append("roi_low_solidity")
+
+    frame_pixels = raw_frame_shape[0] * raw_frame_shape[1]
+    if frame_pixels > 0:
+        coverage = roi_pixels / frame_pixels
+        if coverage < limits["min_roi_coverage"]:
+            reasons.append("roi_coverage_low")
+        if coverage > limits["max_roi_coverage"]:
+            reasons.append("roi_coverage_low")
+
+    return reasons
+
+
 def run_quality_check(
     frame: pd.DataFrame,
     path_column: str = "roi_path",
