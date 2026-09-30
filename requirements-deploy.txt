@@ -5,6 +5,7 @@ pillow
 albumentations
 segmentation-models-pytorch
 mediapipe
+timm
 fastapi
 uvicorn
 python-multipart

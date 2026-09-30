@@ -2,15 +2,14 @@
 
 Menyediakan jalur fitur warna hand-crafted yang interpretable (statistik kanal
 RGB, HSV, CIELAB, rasio terkait hemoglobin, erythema index, entropy, dan fitur
-tekstur) serta jalur deep embedding berbasis backbone ringan dengan modul
-channel spatial attention. Kedua jalur difusikan bersama variabel demografi dan
-site token memakai modul fusion attention.
+tekstur) serta jalur deep embedding berbasis backbone pralatih dengan modul
+channel spatial attention opsional. Backbone yang didukung mencakup CNN
+(ResNet18, MobileNetV3-Small) dan ViT (DINOv2, SigLIP) lewat library timm.
+Kedua jalur difusikan bersama variabel demografi dan site token memakai modul
+fusion attention.
 
 Fitur hand-crafted dihitung pada pixel valid hasil normalisasi Stage 2 agar
-konsisten dengan pipeline iluminasi yang sudah divalidasi. Jalur deep embedding
-memakai ResNet18 pralatih ImageNet dengan modul channel spatial attention yang
-disisipkan setelah blok pertama untuk menonjolkan detail halus seperti pembuluh
-darah, mengikuti rasionalisasi pada literatur BPANet.
+konsisten dengan pipeline iluminasi yang sudah divalidasi.
 """
 from __future__ import annotations
 
@@ -20,6 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
+import timm
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -141,11 +141,16 @@ def compute_handcrafted_features(rgb, valid_mask) -> dict:
     return features
 
 
-def extract_handcrafted_features(manifest: pd.DataFrame) -> pd.DataFrame:
-    """Jalankan ekstraksi fitur hand-crafted untuk seluruh baris manifest."""
+def extract_handcrafted_features(manifest: pd.DataFrame, pixel_high: int = 240) -> pd.DataFrame:
+    """Jalankan ekstraksi fitur hand-crafted untuk seluruh baris manifest.
+
+    Parameter pixel_high diteruskan ke normalize_roi untuk menentukan batas atas
+    channel_max pada valid_pixel_mask, diatur per situs berdasarkan distribusi
+    intensitas jaringan.
+    """
     records = []
     for _, row in manifest.iterrows():
-        normalized = normalize_roi(row["roi_path"])
+        normalized = normalize_roi(row["roi_path"], pixel_high=pixel_high)
         features = compute_handcrafted_features(normalized["rgb"], normalized["valid_mask"])
         features["uid"] = row["uid"]
         records.append(features)
@@ -205,6 +210,30 @@ class CSABlock(nn.Module):
         return x
 
 
+VIT_BACKBONES = {
+    "dinov2_small": "vit_small_patch14_dinov2.lvd142m",
+    "dinov2_base": "vit_base_patch14_dinov2.lvd142m",
+    "siglip_base_patch16_224": "vit_base_patch16_siglip_224",
+    "siglip_base_patch16_384": "vit_base_patch16_siglip_384",
+}
+"""Mapping nama backbone pendek ke nama model timm lengkap.
+
+DINOv2 memakai self-supervised pretraining pada 142M gambar tanpa label,
+menghasilkan representasi visual yang kuat pada regime data kecil. SigLIP
+dilatih pada image-text pairs dengan sigmoid loss, menghasilkan representasi
+generalizable. Kedua jenis backbone mengeluarkan vektor CLS token langsung
+(bukan feature map spasial), sehingga CSA dan pooling tidak diperlukan.
+"""
+
+VIT_INPUT_SIZES = {
+    "dinov2_small": 518,
+    "dinov2_base": 518,
+    "siglip_base_patch16_224": 224,
+    "siglip_base_patch16_384": 384,
+}
+"""Ukuran input yang diharapkan tiap backbone ViT."""
+
+
 def _split_backbone(backbone_name: str, pretrained: bool):
     """Bangun bagian awal dan bagian lanjutan sebuah backbone pralatih ImageNet.
 
@@ -236,13 +265,19 @@ def _split_backbone(backbone_name: str, pretrained: bool):
 
 
 class EmbeddingBackbone(nn.Module):
-    """Backbone pralatih ImageNet dengan modul CSA disisipkan pada tahap dangkal.
+    """Backbone pralatih dengan modul CSA opsional untuk ekstraksi deep embedding.
 
-    Mendukung resnet18 (representasi lebih kaya, cocok sebagai kandidat utama)
-    dan mobilenet_v3_small (lebih ringan, relevan untuk deployment perangkat
-    edge). Dimensi channel pada titik penyisipan CSA dan pada keluaran akhir
-    backbone dideteksi otomatis lewat forward pass dummy, sehingga tidak
-    bergantung pada nilai channel yang di-hardcode per arsitektur.
+    Mendukung dua kategori backbone:
+
+    CNN (resnet18, mobilenet_v3_small): arsitektur dua tahap (early/late) dengan
+    CSA disisipkan di antara keduanya, mengikuti rasionalisasi BPANet. Dimensi
+    channel dideteksi otomatis lewat forward pass dummy.
+
+    ViT (dinov2_small, dinov2_base, siglip_base_patch16_224, siglip_base_patch16_384):
+    dimuat lewat timm, mengeluarkan vektor CLS token langsung. CSA tidak
+    disisipkan karena ViT sudah punya self-attention internal per patch.
+    Ukuran input berbeda per model (518 untuk DINOv2, 224/384 untuk SigLIP),
+    diakses lewat atribut input_size.
     """
 
     def __init__(
@@ -256,22 +291,40 @@ class EmbeddingBackbone(nn.Module):
         super().__init__()
         self.backbone_name = backbone_name
         self.use_csa = use_csa
-        self.early, self.late = _split_backbone(backbone_name, pretrained)
+        self.is_vit = backbone_name in VIT_BACKBONES
 
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, 224, 224)
-            early_output = self.early(dummy)
-            csa_channels = early_output.shape[1]
-            late_output = self.late(early_output)
-            final_channels = late_output.shape[1]
+        if self.is_vit:
+            timm_name = VIT_BACKBONES[backbone_name]
+            self.backbone = timm.create_model(timm_name, pretrained=pretrained, num_classes=0)
+            final_channels = self.backbone.num_features
+            self.input_size = VIT_INPUT_SIZES[backbone_name]
+            self.csa = nn.Identity()
+            self.pool = nn.Identity()
+            self.early = nn.Identity()
+            self.late = nn.Identity()
+        else:
+            self.early, self.late = _split_backbone(backbone_name, pretrained)
+            self.input_size = 224
+            with torch.no_grad():
+                dummy = torch.zeros(1, 3, 224, 224)
+                early_output = self.early(dummy)
+                csa_channels = early_output.shape[1]
+                late_output = self.late(early_output)
+                final_channels = late_output.shape[1]
+            self.pool = nn.AdaptiveAvgPool2d(1)
 
         if seed is not None:
             torch.manual_seed(seed)
-        self.csa = CSABlock(channels=csa_channels) if use_csa else nn.Identity()
-        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        if not self.is_vit:
+            self.csa = CSABlock(channels=csa_channels) if use_csa else nn.Identity()
+
         self.projection = nn.Linear(final_channels, embedding_dim)
 
     def forward(self, x):
+        if self.is_vit:
+            x = self.backbone(x)
+            return self.projection(x)
         x = self.early(x)
         x = self.csa(x)
         x = self.late(x)
@@ -311,7 +364,7 @@ def _augment_roi(rgb: np.ndarray) -> np.ndarray:
     return np.clip(rgb_float, 0.0, 255.0).astype(np.uint8)
 
 
-def load_normalized_resized(roi_path: str, size: int = 224) -> np.ndarray:
+def load_normalized_resized(roi_path: str, size: int = 224, pixel_high: int = 240) -> np.ndarray:
     """Muat dan normalisasi satu citra ROI, lalu ubah ukuran, tanpa augmentasi.
 
     Hasil fungsi ini deterministik terhadap roi_path dan size, sehingga aman
@@ -319,11 +372,11 @@ def load_normalized_resized(roi_path: str, size: int = 224) -> np.ndarray:
     normalize_roi (termasuk CLAHE) adalah langkah paling mahal pada pipeline
     pemuatan citra.
     """
-    normalized = normalize_roi(roi_path)
+    normalized = normalize_roi(roi_path, pixel_high=pixel_high)
     return cv2.resize(normalized["rgb"], (size, size), interpolation=cv2.INTER_AREA)
 
 
-def precompute_normalized_images(manifest: pd.DataFrame, size: int = 224) -> dict:
+def precompute_normalized_images(manifest: pd.DataFrame, size: int = 224, pixel_high: int = 240) -> dict:
     """Precompute dan cache citra ROI ternormalisasi untuk seluruh baris manifest.
 
     Dipanggil sekali sebelum loop k-fold pada fine-tuning end-to-end, sehingga
@@ -333,13 +386,14 @@ def precompute_normalized_images(manifest: pd.DataFrame, size: int = 224) -> dic
     salinan tambahan (copy-on-write) alih-alih memuat ulang dari disk.
     """
     return {
-        row["uid"]: load_normalized_resized(row["roi_path"], size=size)
+        row["uid"]: load_normalized_resized(row["roi_path"], size=size, pixel_high=pixel_high)
         for _, row in manifest.iterrows()
     }
 
 
 def load_roi_tensor(
     roi_path: str, size: int = 224, augment: bool = False, cached_rgb: np.ndarray | None = None,
+    pixel_high: int = 240,
 ) -> torch.Tensor:
     """Muat citra region of interest, ubah ukuran, dan normalisasi gaya ImageNet.
 
@@ -352,7 +406,7 @@ def load_roi_tensor(
     if cached_rgb is not None:
         rgb = cached_rgb
     else:
-        rgb = load_normalized_resized(roi_path, size=size)
+        rgb = load_normalized_resized(roi_path, size=size, pixel_high=pixel_high)
     if augment:
         rgb = _augment_roi(rgb)
     rgb_float = rgb.astype(np.float32) / 255.0
@@ -376,16 +430,17 @@ def freeze_backbone_body(model: "EmbeddingBackbone") -> None:
 class ROIImageDataset(Dataset):
     """Dataset citra region of interest ternormalisasi untuk jalur deep embedding."""
 
-    def __init__(self, frame: pd.DataFrame, size: int = 224):
+    def __init__(self, frame: pd.DataFrame, size: int = 224, pixel_high: int = 240):
         self.rows = frame.reset_index(drop=True)
         self.size = size
+        self.pixel_high = pixel_high
 
     def __len__(self) -> int:
         return len(self.rows)
 
     def __getitem__(self, index):
         row = self.rows.iloc[index]
-        tensor = load_roi_tensor(row["roi_path"], size=self.size)
+        tensor = load_roi_tensor(row["roi_path"], size=self.size, pixel_high=self.pixel_high)
         return tensor, row["uid"]
 
 
@@ -395,6 +450,7 @@ def extract_deep_embeddings(
     size: int = 224,
     batch_size: int = 32,
     device: str | None = None,
+    pixel_high: int = 240,
 ):
     """Jalankan ekstraksi deep embedding untuk seluruh baris manifest.
 
@@ -406,7 +462,7 @@ def extract_deep_embeddings(
     model = model.to(device)
     model.eval()
 
-    dataset = ROIImageDataset(manifest, size=size)
+    dataset = ROIImageDataset(manifest, size=size, pixel_high=pixel_high)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=2)
 
     embeddings = []

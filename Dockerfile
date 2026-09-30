@@ -12,14 +12,16 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 COPY app/ app/
 COPY src/ src/
 COPY configs/ configs/
-COPY outputs/conjunctiva/multitask_optuna_best_params.json outputs/conjunctiva/multitask_optuna_best_params.json
-COPY artifacts/conjunctiva/ artifacts/conjunctiva/
-COPY artifacts/palm/embedding_backbone_resnet18.pt artifacts/palm/embedding_backbone_resnet18.pt
-COPY artifacts/palm/multitask_full_fusion_resnet18_fold0.pt artifacts/palm/multitask_full_fusion_resnet18_fold0.pt
+COPY artifacts/conjunctiva/segmentation_unet.pt artifacts/conjunctiva/segmentation_unet.pt
+COPY artifacts/conjunctiva/embedding_backbone_dinov2_small.pt artifacts/conjunctiva/embedding_backbone_dinov2_small.pt
+COPY artifacts/conjunctiva/multitask_full_fusion_dinov2_small_fold0.pt artifacts/conjunctiva/multitask_full_fusion_dinov2_small_fold0.pt
+COPY artifacts/conjunctiva/fusion_stats.json artifacts/conjunctiva/fusion_stats.json
+COPY artifacts/palm/embedding_backbone_siglip_base_patch16_224.pt artifacts/palm/embedding_backbone_siglip_base_patch16_224.pt
+COPY artifacts/palm/multitask_path_b_deep_siglip_base_patch16_224_fold0.pt artifacts/palm/multitask_path_b_deep_siglip_base_patch16_224_fold0.pt
 COPY artifacts/palm/fusion_stats.json artifacts/palm/fusion_stats.json
 COPY artifacts/palm/hand_landmarker.task artifacts/palm/hand_landmarker.task
-COPY artifacts/nail/embedding_backbone_resnet18.pt artifacts/nail/embedding_backbone_resnet18.pt
-COPY artifacts/nail/multitask_path_b_deep_resnet18_fold0.pt artifacts/nail/multitask_path_b_deep_resnet18_fold0.pt
+COPY artifacts/nail/embedding_backbone_siglip_base_patch16_224.pt artifacts/nail/embedding_backbone_siglip_base_patch16_224.pt
+COPY artifacts/nail/multitask_path_b_deep_siglip_base_patch16_224_fold0.pt artifacts/nail/multitask_path_b_deep_siglip_base_patch16_224_fold0.pt
 COPY artifacts/nail/fusion_stats.json artifacts/nail/fusion_stats.json
 
 ENV PORT=8080

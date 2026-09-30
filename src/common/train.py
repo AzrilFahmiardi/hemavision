@@ -47,13 +47,16 @@ def _class_weights(labels: np.ndarray, num_classes: int) -> torch.Tensor:
 
 
 def _safe_auc(true_labels: np.ndarray, predicted_probability: np.ndarray) -> float:
-    """Hitung ROC AUC, mengembalikan NaN bila fold hanya berisi satu kelas.
+    """Hitung ROC AUC, mengembalikan NaN bila fold hanya berisi satu kelas
+    atau prediksi mengandung NaN (misal model diverge pada learning rate tinggi).
 
     Dilaporkan berdampingan dengan accuracy karena AUC tidak bergantung pada
     ambang keputusan dan prevalensi kelas, sehingga tidak menyesatkan seperti
     accuracy pada dataset anemia yang timpang (mayoritas non-anemic).
     """
     if len(np.unique(true_labels)) < 2:
+        return float("nan")
+    if np.any(np.isnan(predicted_probability)):
         return float("nan")
     return float(roc_auc_score(true_labels, predicted_probability))
 
@@ -251,6 +254,9 @@ def run_kfold(
             predicted_anemic = val_outputs["classification_logits"].argmax(dim=1).cpu().numpy()
             predicted_anemic_prob = torch.softmax(val_outputs["classification_logits"], dim=1)[:, 1].cpu().numpy()
             predicted_severity = CornLoss.predict_rank(val_outputs["severity_logits"]).cpu().numpy()
+            if np.any(np.isnan(predicted_hb)):
+                predicted_hb = np.nan_to_num(predicted_hb, nan=0.0)
+                predicted_anemic_prob = np.nan_to_num(predicted_anemic_prob, nan=0.5)
 
         mae = float(np.mean(np.abs(predicted_hb - val_hb)))
         rmse = float(np.sqrt(np.mean((predicted_hb - val_hb) ** 2)))

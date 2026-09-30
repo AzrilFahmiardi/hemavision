@@ -81,19 +81,22 @@ def resize_to_canonical_resolution(rgb: np.ndarray, mask: np.ndarray, width: int
     return resized_rgb, resized_mask
 
 
-def normalize_roi(path: str, crop: bool = True, clip_limit: float = 2.0):
+def normalize_roi(path: str, crop: bool = True, clip_limit: float = 2.0, pixel_high: int = 240):
     """Pipeline normalisasi untuk satu citra region of interest.
 
     Mengembalikan RGB ternormalisasi, mask region of interest, dan mask pixel
     valid. Latar di luar region of interest dinolkan agar tidak ikut terhitung
-    pada tahap ekstraksi fitur.
+    pada tahap ekstraksi fitur. Parameter pixel_high menentukan batas atas
+    channel_max pada valid_pixel_mask, diatur per situs berdasarkan distribusi
+    intensitas jaringan (conjunctiva/nail 220, palm 235, default 240 untuk
+    kompatibilitas mundur).
     """
     rgb, mask = load_roi(path)
     if crop:
         rgb, mask = crop_to_roi(rgb, mask)
     normalized = clahe_on_v(rgb, clip_limit=clip_limit).copy()
     normalized[~mask] = 0
-    valid = valid_pixel_mask(normalized, mask)
+    valid = valid_pixel_mask(normalized, mask, high=pixel_high)
     return {
         "rgb": normalized,
         "roi_mask": mask,
