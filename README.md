@@ -19,6 +19,27 @@ Setiap pipeline situs mengikuti alur yang sama secara konseptual:
 4. **Ekstraksi fitur dual-path**: fitur warna/tekstur hand-crafted (27 fitur berbasis RGB, HSV, CIELAB, tekstur, entropi) dan embedding deep (ResNet18), digabung lewat fusion vector bersama variabel demografi (usia, gender) dan site token.
 5. **Model prediksi multi-task** (`HemavisionModel`), memprediksi kadar hemoglobin (regresi), status anemia (klasifikasi biner), dan severity (klasifikasi ordinal) sekaligus dari satu fusion vector.
 
+## Runtime Deployment
+
+Service inference nail memakai backbone SigLIP-Base dan membutuhkan memory Cloud Run
+minimal 4 GiB. Batas 2 GiB dapat membuat instance dihentikan saat model pertama kali
+dimuat, sehingga endpoint `/predict/nail` mengembalikan `503` meskipun endpoint
+`/check-quality/nail` berhasil.
+
+Konfigurasi service saat ini dapat diperbarui dengan:
+
+```bash
+gcloud run services update hemavision-nail \
+  --project=hemavision-503304 \
+  --region=asia-southeast2 \
+  --platform=managed \
+  --memory=4Gi
+```
+
+Setelah deployment, uji endpoint `/check-quality/nail` dan `/predict/nail` memakai
+sample foto nyata. Jangan menganggap service sehat hanya dari startup probe, karena
+penggunaan memory tertinggi terjadi ketika request prediksi pertama memuat backbone.
+
 ## Situs 1: Konjungtiva
 
 Dataset: CP-AnemiC dan Eyes-Defy. Input berupa satu foto mata mentah.
