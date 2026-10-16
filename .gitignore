@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+artifacts_backup_resnet18/
