@@ -1,0 +1,10 @@
+- .git/
+- dataset/
+- outputs/**
+- artifacts/**
+- artifacts_backup_resnet18/
+- __pycache__/
+- .ipynb_checkpoints/
+- docs/
++ /README.md
+- *.md
