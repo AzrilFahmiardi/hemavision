@@ -21,24 +21,30 @@ Setiap pipeline situs mengikuti alur yang sama secara konseptual:
 
 ## Runtime Deployment
 
-Service inference nail memakai backbone SigLIP-Base dan membutuhkan memory Cloud Run
-minimal 4 GiB. Batas 2 GiB dapat membuat instance dihentikan saat model pertama kali
-dimuat, sehingga endpoint `/predict/nail` mengembalikan `503` meskipun endpoint
-`/check-quality/nail` berhasil.
+Service inference palm dan nail memakai backbone SigLIP-Base dan membutuhkan
+memory Cloud Run minimal 4 GiB dengan 2 CPU. Batas 2 GiB dapat membuat instance
+dihentikan saat model pertama kali dimuat, sehingga endpoint `/predict/palm` atau
+`/predict/nail` mengembalikan `503` meskipun endpoint `/check-quality/palm` atau
+`/check-quality/nail` berhasil. Service konjungtiva (DINOv2-Small) cukup dengan
+2 GiB.
 
 Konfigurasi service saat ini dapat diperbarui dengan:
 
 ```bash
-gcloud run services update hemavision-nail \
-  --project=hemavision-503304 \
-  --region=asia-southeast2 \
-  --platform=managed \
-  --memory=4Gi
+for service in hemavision-palm hemavision-nail; do
+  gcloud run services update "$service" \
+    --project=hemavision-503304 \
+    --region=asia-southeast2 \
+    --platform=managed \
+    --memory=4Gi \
+    --cpu=2
+done
 ```
 
-Setelah deployment, uji endpoint `/check-quality/nail` dan `/predict/nail` memakai
-sample foto nyata. Jangan menganggap service sehat hanya dari startup probe, karena
-penggunaan memory tertinggi terjadi ketika request prediksi pertama memuat backbone.
+Setelah deployment, uji endpoint `/check-quality/<situs>` dan `/predict/<situs>`
+memakai sample foto nyata. Jangan menganggap service sehat hanya dari startup probe,
+karena penggunaan memory tertinggi terjadi ketika request prediksi pertama memuat
+backbone.
 
 ## Situs 1: Konjungtiva
 

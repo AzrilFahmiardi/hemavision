@@ -168,6 +168,11 @@ def validate_roi_geometry(
     region anatomis yang valid, misalnya mask terfragmentasi, terlalu tipis,
     berlubang, atau hanya mencakup potongan kecil dari frame.
 
+    Solidity dihitung pada komponen terbesar sebagai jumlah piksel komponen
+    dibagi luas convex hull komponen tersebut, sehingga lubang di dalam mask
+    tetap menurunkan nilainya. Fragmentasi antar komponen sudah ditangani
+    oleh max_components dan tidak ikut menurunkan solidity.
+
     Mengembalikan list string reason untuk setiap pemeriksaan yang gagal.
     List kosong berarti geometri mask dianggap wajar.
     """
@@ -185,7 +190,7 @@ def validate_roi_geometry(
 
     binary = (mask_uint8 > 0).astype(np.uint8) if mask.dtype != bool else mask_uint8
 
-    num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     foreground_components = num_labels - 1
     if foreground_components > limits["max_components"]:
         reasons.append("roi_fragmented")
@@ -202,13 +207,12 @@ def validate_roi_geometry(
             if aspect > limits["max_aspect_ratio"]:
                 reasons.append("roi_too_thin")
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if contours:
-        all_points = np.concatenate(contours)
-        hull = cv2.convexHull(all_points)
-        hull_area = cv2.contourArea(hull)
+    if foreground_components > 0:
+        largest = (labels == largest_idx).astype(np.uint8)
+        contours, _ = cv2.findContours(largest, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        hull_area = cv2.contourArea(cv2.convexHull(np.concatenate(contours)))
         if hull_area > 0:
-            solidity = roi_pixels / hull_area
+            solidity = int(largest.sum()) / hull_area
             if solidity < limits["min_solidity"]:
                 reasons.append("roi_low_solidity")
 
