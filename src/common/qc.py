@@ -13,7 +13,10 @@ sebagai pasangan RGB uint8 dan mask boolean yang seragam.
 from __future__ import annotations
 
 import contextlib
+import functools
+import json
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -147,84 +150,111 @@ def quality_check(path: str, thresholds: dict | None = None) -> dict:
     return metrics
 
 
-ROI_GEOMETRY_THRESHOLDS = {
-    "max_components": 3,
-    "max_aspect_ratio": 5.0,
-    "min_solidity": 0.4,
-    "min_roi_coverage": 0.02,
-    "max_roi_coverage": 0.95,
+GATE_REASONS = {
+    "laplacian_variance": ("blur", None),
+    "brightness": ("underexposed", "overexposed"),
+    "glare_fraction": (None, "glare"),
+    "roi_pixels": ("roi_too_small", None),
+    "components": (None, "roi_fragmented"),
+    "aspect_ratio": (None, "roi_too_thin"),
+    "solidity": ("roi_low_solidity", None),
+    "coverage": ("roi_coverage_low", "roi_coverage_high"),
+    "centroid_offset": (None, "roi_off_center"),
+    "segmentation_confidence": ("roi_confidence_low", None),
+    "skin_coverage": ("roi_landmark_unreliable", "roi_landmark_unreliable"),
+    "finger_area_frac": ("roi_finger_area_abnormal", "roi_finger_area_abnormal"),
+    "nail_area_frac": ("roi_nail_area_abnormal", "roi_nail_area_abnormal"),
 }
+"""Pemetaan metrik quality control ke alasan penolakan (di bawah batas, di atas batas).
+
+Kosakata alasan dikunci di kode karena dipakai sebagai kontrak response API,
+sedangkan nilai batasnya dibaca dari configs/qc_thresholds.json agar dapat
+dikalibrasi ulang tanpa mengubah kode.
+"""
+
+QC_THRESHOLDS_PATH = Path(__file__).resolve().parents[2] / "configs" / "qc_thresholds.json"
 
 
-def validate_roi_geometry(
-    mask: np.ndarray,
-    raw_frame_shape: tuple[int, ...],
-    thresholds: dict | None = None,
-) -> list[str]:
-    """Validasi geometri mask ROI terhadap frame mentah.
+@functools.lru_cache(maxsize=None)
+def load_site_gates(site: str) -> dict:
+    """Baca batas gate quality control satu situs dari configs/qc_thresholds.json.
 
-    Memeriksa empat properti geometris yang menangkap kasus ROI lolos
-    pengecekan piksel absolut tetapi secara bentuk tidak masuk akal sebagai
-    region anatomis yang valid, misalnya mask terfragmentasi, terlalu tipis,
-    berlubang, atau hanya mencakup potongan kecil dari frame.
-
-    Solidity dihitung pada komponen terbesar sebagai jumlah piksel komponen
-    dibagi luas convex hull komponen tersebut, sehingga lubang di dalam mask
-    tetap menurunkan nilainya. Fragmentasi antar komponen sudah ditangani
-    oleh max_components dan tidak ikut menurunkan solidity.
-
-    Mengembalikan list string reason untuk setiap pemeriksaan yang gagal.
-    List kosong berarti geometri mask dianggap wajar.
+    Setiap entri berbentuk {"min": nilai atau null, "max": nilai atau null}.
+    Metrik yang tidak tercantum tidak di-gate untuk situs tersebut.
     """
-    limits = dict(ROI_GEOMETRY_THRESHOLDS)
-    if thresholds:
-        limits.update(thresholds)
+    with open(QC_THRESHOLDS_PATH) as handle:
+        policy = json.load(handle)
+    return {
+        metric: {"min": bound.get("min"), "max": bound.get("max")}
+        for metric, bound in policy["sites"][site]["gates"].items()
+    }
 
+
+def apply_gates(metrics: dict, gates: dict) -> list[str]:
+    """Bandingkan metrik dengan batas gate dan kembalikan alasan penolakan unik.
+
+    Metrik yang bernilai None atau tidak ada pada dict dilewati, misalnya
+    skin_coverage yang hanya diukur pada jalur skin_fallback palm.
+    """
     reasons: list[str] = []
-    mask_uint8 = mask.astype(np.uint8) if mask.dtype != np.uint8 else mask
+    for metric, bound in gates.items():
+        value = metrics.get(metric)
+        if value is None:
+            continue
+        reason_below, reason_above = GATE_REASONS[metric]
+        if bound["min"] is not None and value < bound["min"]:
+            reasons.append(reason_below)
+        if bound["max"] is not None and value > bound["max"]:
+            reasons.append(reason_above)
+    return list(dict.fromkeys(reasons))
 
-    roi_pixels = int(mask_uint8.sum()) if mask.dtype == bool else int((mask_uint8 > 0).sum())
+
+def measure_photometric(rgb, mask) -> dict:
+    """Ukur ketajaman, kecerahan, dan glare pada area dalam mask yang sudah dierosi."""
+    inner = erode_mask(mask, 3)
+    return {
+        "laplacian_variance": laplacian_variance(rgb, inner),
+        "brightness": mean_brightness(rgb, inner),
+        "glare_fraction": glare_fraction(rgb, inner),
+    }
+
+
+def measure_roi_geometry(mask: np.ndarray, raw_frame_shape: tuple[int, ...]) -> dict:
+    """Ukur geometri mask ROI terhadap frame mentah tanpa menerapkan batas apa pun.
+
+    Metrik yang dikembalikan adalah jumlah komponen terhubung, rasio aspek
+    kotak pembatas komponen terbesar, solidity komponen terbesar, dan
+    coverage mask terhadap frame mentah. Solidity dihitung sebagai jumlah
+    piksel komponen terbesar dibagi luas convex hull komponen itu, sehingga
+    lubang di dalam mask tetap menurunkan nilainya, sementara fragmentasi
+    antar komponen ditangani terpisah oleh jumlah komponen. Mask kosong
+    menghasilkan coverage 0 dan metrik bentuk bernilai None.
+    """
+    binary = (mask > 0).astype(np.uint8)
+    roi_pixels = int(binary.sum())
+    frame_pixels = raw_frame_shape[0] * raw_frame_shape[1]
+    metrics = {
+        "components": 0,
+        "aspect_ratio": None,
+        "solidity": None,
+        "coverage": roi_pixels / frame_pixels if frame_pixels > 0 else 0.0,
+    }
     if roi_pixels < 10:
-        reasons.append("roi_coverage_low")
-        return reasons
-
-    binary = (mask_uint8 > 0).astype(np.uint8) if mask.dtype != bool else mask_uint8
+        return metrics
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
-    foreground_components = num_labels - 1
-    if foreground_components > limits["max_components"]:
-        reasons.append("roi_fragmented")
+    metrics["components"] = int(num_labels - 1)
+    largest_idx = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+    width = int(stats[largest_idx, cv2.CC_STAT_WIDTH])
+    height = int(stats[largest_idx, cv2.CC_STAT_HEIGHT])
+    metrics["aspect_ratio"] = max(width, height) / max(min(width, height), 1)
 
-    if foreground_components > 0:
-        component_areas = stats[1:, cv2.CC_STAT_AREA]
-        largest_idx = int(np.argmax(component_areas)) + 1
-        x = stats[largest_idx, cv2.CC_STAT_LEFT]
-        y = stats[largest_idx, cv2.CC_STAT_TOP]
-        w = stats[largest_idx, cv2.CC_STAT_WIDTH]
-        h = stats[largest_idx, cv2.CC_STAT_HEIGHT]
-        if w > 0 and h > 0:
-            aspect = max(w, h) / max(min(w, h), 1)
-            if aspect > limits["max_aspect_ratio"]:
-                reasons.append("roi_too_thin")
-
-    if foreground_components > 0:
-        largest = (labels == largest_idx).astype(np.uint8)
-        contours, _ = cv2.findContours(largest, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        hull_area = cv2.contourArea(cv2.convexHull(np.concatenate(contours)))
-        if hull_area > 0:
-            solidity = int(largest.sum()) / hull_area
-            if solidity < limits["min_solidity"]:
-                reasons.append("roi_low_solidity")
-
-    frame_pixels = raw_frame_shape[0] * raw_frame_shape[1]
-    if frame_pixels > 0:
-        coverage = roi_pixels / frame_pixels
-        if coverage < limits["min_roi_coverage"]:
-            reasons.append("roi_coverage_low")
-        if coverage > limits["max_roi_coverage"]:
-            reasons.append("roi_coverage_low")
-
-    return reasons
+    largest = (labels == largest_idx).astype(np.uint8)
+    contours, _ = cv2.findContours(largest, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hull_area = cv2.contourArea(cv2.convexHull(np.concatenate(contours)))
+    if hull_area > 0:
+        metrics["solidity"] = min(int(largest.sum()) / hull_area, 1.0)
+    return metrics
 
 
 def run_quality_check(
